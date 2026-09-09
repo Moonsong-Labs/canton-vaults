@@ -1,0 +1,41 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Share where
+
+import Splice.Api.Token.HoldingV2 (Account(..), Holding, HoldingView(..), InstrumentId(..))
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
+
+shareInstrumentId : Text -> Party -> InstrumentId
+shareInstrumentId uuid manager = InstrumentId with
+  admin = manager
+  id = "share:" <> uuid
+
+shareAccount : Party -> Account
+shareAccount depositor = Account with
+  owner = Some depositor
+  provider = None
+  id = ""
+
+-- A claim on the vault, held as a token-standard Holding so wallets and
+-- other apps read it like any other asset.
+template Share
+  with
+    uuid : Text
+    manager : Party
+    depositor : Party
+    shares : Decimal
+  where
+    signatory manager, depositor
+    ensure uuid /= "" && shares > 0.0
+
+    interface instance Holding for Share where
+      view = shareHoldingView this
+
+shareHoldingView : Share -> HoldingView
+shareHoldingView Share{..} = HoldingView with
+  account = shareAccount depositor
+  instrumentId = shareInstrumentId uuid manager
+  amount = shares
+  lock = None
+  meta = emptyMetadata

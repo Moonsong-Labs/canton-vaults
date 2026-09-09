@@ -1,0 +1,29 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module TieredFee where
+
+import DA.List (head, last, sort)
+
+import IFee
+
+template TieredFee
+  with
+    manager : Party
+    tiers : [(Decimal, Decimal)]
+  where
+    signatory manager
+    ensure
+      not (null tiers)
+        && fst (head tiers) == 0.0
+        && all (\(threshold, rate) -> threshold >= 0.0 && rate >= 0.0 && rate < 1.0) tiers
+        && sort (map fst tiers) == map fst tiers
+
+    interface instance IFee for TieredFee where
+      view = FeeView with manager, label = "tiered"
+      calculateFee amount = amount * rateFor tiers amount
+
+-- The template invariant ensures the tiers are sorted and start at zero.
+rateFor : [(Decimal, Decimal)] -> Decimal -> Decimal
+rateFor tiers amount =
+  last [rate | (threshold, rate) <- tiers, amount >= threshold]

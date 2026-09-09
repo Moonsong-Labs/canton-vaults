@@ -1,0 +1,24 @@
+name: Setup Daml
+description: Install DPM and the Daml SDK used by the repository.
+
+inputs:
+  sdk-version:
+    description: Daml SDK version to install through DPM.
+    required: false
+    default: "3.5.2"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Daml SDK
+      shell: bash
+      env:
+        SDK_VERSION: ${{ inputs.sdk-version }}
+        TERM: dumb
+      run: |
+        set -euo pipefail
+
+        curl -fsSL https://get.digitalasset.com/install/install.sh | sh -s "$SDK_VERSION"
+        echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
+        export PATH="$HOME/.dpm/bin:$PATH"
+        dpm --version

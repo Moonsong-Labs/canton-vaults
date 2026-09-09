@@ -1,0 +1,18 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module PercentageFee where
+
+import IFee
+
+template PercentageFee
+  with
+    manager : Party
+    rate : Decimal
+  where
+    signatory manager
+    ensure rate >= 0.0 && rate < 1.0
+
+    interface instance IFee for PercentageFee where
+      view = FeeView with manager, label = "percentage"
+      calculateFee amount = amount * rate

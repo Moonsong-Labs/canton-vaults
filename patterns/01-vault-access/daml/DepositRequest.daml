@@ -1,0 +1,180 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module DepositRequest where
+
+import DA.Foldable (forA_)
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.AllocationV2
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.MetadataV1
+
+import AttestationInfo
+import DepositInfo
+import Share
+
+depositSettlementId : Text
+depositSettlementId = "vault-deposit"
+
+data DepositSettlement = DepositSettlement with
+  amount : Decimal
+  mintedShares : Decimal
+  shareCid : ContractId Share
+    deriving (Eq, Show)
+
+template DepositRequest
+  with
+    vaultId : Text
+    manager : Party
+    depositor : Party
+    vaultCid : ContractId DepositInfo
+    instrumentId : InstrumentId
+    amount : Decimal
+    settlement : SettlementInfo
+    allocationCid : ContractId Allocation
+    attestationCid : ContractId AttestationInfo
+  where
+    signatory manager, depositor
+    ensure
+      vaultId /= ""
+        && instrumentId.id /= ""
+        && amount > 0.0
+        && settlement.executors == [manager]
+        && settlement.id == depositSettlementId
+        && settlement.cid /= None
+
+    choice CancelDeposit : AllocationResult
+      with
+        extraArgs : ExtraArgs
+      controller depositor
+      do
+        exercise allocationCid Allocation_Withdraw with
+          actors = [depositor]
+          extraArgs
+
+    choice RejectDeposit : AllocationResult
+      with
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        exercise allocationCid Allocation_Cancel with
+          actors = [manager]
+          extraArgs
+
+    choice AcceptDeposit : DepositSettlement
+      with
+        settlementFactoryCid : ContractId SettlementFactory
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        -- KYB approval may have been revoked after the request was created.
+        attestation <- view <$> fetch attestationCid
+        assertMsg "attestation is from another manager" (attestation.manager == manager)
+        assertMsg "attestation is for another depositor" (attestation.depositor == depositor)
+        assertMsg "attestation does not cover this vault" (vaultId `elem` attestation.vaultIds)
+
+        vault <- view <$> fetch vaultCid
+        assertMsg "vault ID does not match deposit request" (vault.vaultId == vaultId)
+        assertMsg "vault manager does not match deposit request" (vault.manager == manager)
+        assertMsg "vault instrument does not match deposit request"
+          (vault.acceptedInstrument == instrumentId)
+
+        allocation <- fetch allocationCid
+        let allocationView = view allocation
+        holdingView <- fetchDepositHolding allocationView vault this
+        assertSettlementFactory settlementFactoryCid manager instrumentId
+
+        let leg = TransferLeg with
+              transferLegId = depositSettlementId
+              sender = allocationView.allocation.authorizer
+              receiver = vault.treasury
+              amount = holdingView.amount
+              instrumentId = instrumentId.id
+              meta = emptyMetadata
+
+        settlementResult <- exercise settlementFactoryCid SettlementFactory_SettleBatch with
+          settlement
+          transferLegs = [leg]
+          allocations = [FinalizedAllocation with
+            allocationCid
+            extraTransferLegSides = [senderSide leg]
+            nextIterationFunding = None]
+          actors = [manager]
+          extraArgs
+        requireCompletedSettlement 1 settlementResult
+
+        shareCid <- create Share with
+          uuid = vaultId
+          manager
+          depositor
+          shares = holdingView.amount
+        pure DepositSettlement with
+          amount = holdingView.amount
+          mintedShares = holdingView.amount
+          shareCid
+
+-- | Validates that the allocation is the locked funding captured by the
+-- request, then returns the holding used by the settlement.
+fetchDepositHolding : AllocationView -> DepositView -> DepositRequest -> Update HoldingView
+fetchDepositHolding allocationView vault request = do
+  assertMsg "allocation belongs to a different settlement"
+    (allocationView.settlement == request.settlement)
+  assertMsg "allocation instrument admin does not match deposit request"
+    (allocationView.allocation.admin == request.instrumentId.admin)
+  assertMsg "allocation authorizer does not belong to depositor"
+    (allocationView.allocation.authorizer.owner == Some request.depositor)
+  assertMsg "deposit allocation must use deferred transfer legs"
+    (allocationView.allocation.transferLegSides == [])
+  assertMsg "deposit allocation funding does not match request amount"
+    (allocationView.allocation.nextIterationFunding
+      == Some (TextMap.fromList [(request.instrumentId.id, request.amount)]))
+  assertMsg "deposit allocation must remain withdrawable"
+    (not allocationView.allocation.committed)
+
+  lockedHoldingCid <- case allocationView.holdingCids of
+    [cid] -> pure cid
+    _ -> fail "deposit allocation must contain one locked holding"
+  lockedHolding <- fetch lockedHoldingCid
+  let holdingView = view lockedHolding
+  assertMsg "locked holding account does not match allocation authorizer"
+    (holdingView.account == allocationView.allocation.authorizer)
+  assertMsg "locked holding instrument does not match deposit request"
+    (holdingView.instrumentId == request.instrumentId)
+  assertMsg "locked holding amount does not match deposit request"
+    (holdingView.amount == request.amount)
+  assertMsg "locked holding is below vault minimum"
+    (holdingView.amount >= vault.minDeposit)
+  assertMsg "deposit allocation holding is not locked" (holdingView.lock /= None)
+  pure holdingView
+
+-- | Builds the sender authorization that lets the allocation fund a transfer
+-- leg during token-standard settlement.
+senderSide : TransferLeg -> TransferLegSide
+senderSide TransferLeg{..} = TransferLegSide with
+  transferLegId
+  side = SenderSide
+  otherside = receiver
+  amount
+  instrumentId
+  meta
+
+-- | Confirms that the settlement factory is administered by the request's
+-- instrument administrator.
+assertSettlementFactory : ContractId SettlementFactory -> Party -> InstrumentId -> Update ()
+assertSettlementFactory settlementFactoryCid manager instrumentId = do
+  settlementFactoryView <- exercise settlementFactoryCid SettlementFactory_PublicFetch with
+    actors = [manager]
+  assertMsg "settlement factory does not match instrument admin"
+    (settlementFactoryView.admin == instrumentId.admin)
+
+-- | Ensures every expected allocation settled synchronously. Any other result
+-- aborts the enclosing transaction.
+requireCompletedSettlement : Int -> SettlementFactory_SettleBatchResult -> Update ()
+requireCompletedSettlement expectedResultCount settlementResult = do
+  assertMsg "settlement returned unexpected result count"
+    (length settlementResult.allocationSettleResults == expectedResultCount)
+  forA_ settlementResult.allocationSettleResults $ \allocationResult ->
+    case allocationResult.output of
+      AllocationResult_Settled None -> pure ()
+      _ -> fail "settlement did not complete"

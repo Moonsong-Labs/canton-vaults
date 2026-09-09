@@ -1,0 +1,11 @@
+packages:
+  - ./patterns/01-vault-access/interface
+  - ./patterns/01-vault-access
+  - ./patterns/01-vault-access/test
+  - ./patterns/02-pluggable-component/interface
+  - ./patterns/02-pluggable-component
+  - ./patterns/02-pluggable-component/test
+  - ./patterns/03-public-private-split/interface
+  - ./patterns/03-public-private-split/public
+  - ./patterns/03-public-private-split/private
+  - ./patterns/03-public-private-split/test

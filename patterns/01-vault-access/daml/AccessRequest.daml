@@ -1,0 +1,39 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module AccessRequest where
+
+import AttestationInfo
+import VaultAccess
+
+-- The depositor-led path to a permission. The depositor asks, the manager
+-- decides. Accepting creates the same VaultAccess the manager could have
+-- created directly.
+template AccessRequest
+  with
+    vaultId : Text
+    manager : Party
+    depositor : Party
+  where
+    signatory depositor
+    observer manager
+    ensure vaultId /= ""
+
+    choice Cancel : ()
+      controller depositor
+      do pure ()
+
+    choice Reject : ()
+      controller manager
+      do pure ()
+
+    choice Accept : ContractId VaultAccess
+      with
+        attestationCid : ContractId AttestationInfo
+      controller manager
+      do
+        attestation <- view <$> fetch attestationCid
+        assertMsg "attestation is from another manager" (attestation.manager == manager)
+        assertMsg "attestation is for another depositor" (attestation.depositor == depositor)
+        assertMsg "attestation does not cover this vault" (vaultId `elem` attestation.vaultIds)
+        create VaultAccess with vaultId, manager, depositor, attestationCid

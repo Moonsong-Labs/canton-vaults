@@ -1,0 +1,51 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module AccessAttestation where
+
+import DA.List (dedup)
+
+import AttestationInfo
+import AccessRequest (AccessRequest(..))
+
+-- The manager's KYB approval for one depositor, scoped to a list of vaults.
+-- Supporting evidence stays off-ledger.
+template AccessAttestation
+  with
+    manager : Party
+    depositor : Party
+    vaultIds : [Text]
+    evidenceHash : Optional Text
+  where
+    signatory manager
+    observer depositor
+    ensure
+      evidenceHash /= Some ""
+        && all (/= "") vaultIds
+        && length vaultIds == length (dedup vaultIds)
+
+    interface instance AttestationInfo for AccessAttestation where
+      view = AttestationView with manager, depositor, vaultIds
+
+    -- For user-driven access, a choice like this lets the depositor request
+    -- access to vaults after successfully completing onboarding.
+    -- Separate requests let the manager approve or reject each vault independently.
+    nonconsuming choice RequestAccess : [ContractId AccessRequest]
+      with
+        requestedVaultIds : [Text]
+      controller depositor
+      do
+        assertMsg "request requires at least one vault" (not (null requestedVaultIds))
+        assertMsg "requested vaults must be unique"
+          (length requestedVaultIds == length (dedup requestedVaultIds))
+        assertMsg "attestation does not cover every requested vault"
+          (all (`elem` vaultIds) requestedVaultIds)
+        forA requestedVaultIds $ \vaultId ->
+          create AccessRequest with
+            vaultId
+            manager
+            depositor
+
+    choice Revoke : ()
+      controller manager
+      do return ()

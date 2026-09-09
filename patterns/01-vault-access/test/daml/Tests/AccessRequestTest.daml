@@ -1,0 +1,80 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Tests.AccessRequestTest where
+
+import Daml.Script
+
+import AccessAttestation (AccessAttestation(..))
+import AccessRequest
+import AttestationInfo
+import VaultAccess
+
+data Setup = Setup with
+  manager : Party
+  depositor : Party
+  attestationCid : ContractId AttestationInfo
+  requestCid : ContractId AccessRequest
+
+setup : Script Setup
+setup = script do
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+  attestationTemplateCid <- submit manager $ createCmd AccessAttestation with
+    manager; depositor; vaultIds = ["vault-001"]; evidenceHash = Some "sha256:test-kyb-evidence"
+  let attestationCid = toInterfaceContractId @AttestationInfo attestationTemplateCid
+  requestCid <- submit depositor $ createCmd AccessRequest with
+    vaultId = "vault-001"; manager; depositor
+  pure Setup with manager; depositor; attestationCid; requestCid
+
+-- The manager accepts and the depositor ends up with the same permission the
+-- manager could have created directly.
+testAcceptCreatesVaultAccess : Script ()
+testAcceptCreatesVaultAccess = script do
+  Setup{..} <- setup
+  accessCid <- submit manager $ exerciseCmd requestCid Accept with attestationCid
+  Some access <- queryContractId depositor accessCid
+  assertMsg "permission is for the requested vault" (access.vaultId == "vault-001")
+  assertMsg "permission references the attestation" (access.attestationCid == attestationCid)
+  None <- queryContractId depositor requestCid
+  pure ()
+
+-- Only the manager decides, and the depositor keeps the option to withdraw.
+testOnlyManagerDecidesDepositorCancels : Script ()
+testOnlyManagerDecidesDepositorCancels = script do
+  Setup{..} <- setup
+  stranger <- allocateParty "Stranger"
+  Some requestDisclosure <- queryDisclosure depositor requestCid
+  submitMustFail (actAs stranger <> disclose requestDisclosure) $
+    exerciseCmd requestCid Accept with attestationCid
+  submitMustFail depositor $ exerciseCmd requestCid Accept with attestationCid
+  submitMustFail depositor $ exerciseCmd requestCid Reject
+  submit depositor $ exerciseCmd requestCid Cancel
+  None <- queryContractId depositor requestCid
+  pure ()
+
+testManagerRejects : Script ()
+testManagerRejects = script do
+  Setup{..} <- setup
+  submit manager $ exerciseCmd requestCid Reject
+  None <- queryContractId depositor requestCid
+  pure ()
+
+-- Accepting requires an attestation for this depositor from this manager.
+testAcceptRequiresMatchingAttestation : Script ()
+testAcceptRequiresMatchingAttestation = script do
+  Setup{..} <- setup
+  other <- allocateParty "Other"
+  otherAttestationCid <- submit manager $ createCmd AccessAttestation with
+    manager; depositor = other; vaultIds = ["vault-001"]; evidenceHash = None
+  submitMustFail manager $ exerciseCmd requestCid Accept with
+    attestationCid = toInterfaceContractId @AttestationInfo otherAttestationCid
+
+-- The attestation must also cover the requested vault.
+testAcceptRequiresVaultInScope : Script ()
+testAcceptRequiresVaultInScope = script do
+  Setup{..} <- setup
+  narrowCid <- submit manager $ createCmd AccessAttestation with
+    manager; depositor; vaultIds = ["vault-999"]; evidenceHash = None
+  submitMustFail manager $ exerciseCmd requestCid Accept with
+    attestationCid = toInterfaceContractId @AttestationInfo narrowCid

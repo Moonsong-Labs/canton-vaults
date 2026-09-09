@@ -1,0 +1,54 @@
+name: Daml Checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  daml-checks:
+    name: daml-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Daml
+        uses: ./.github/actions/setup-daml
+        with:
+          sdk-version: "3.5.2"
+
+      - name: Build Daml packages
+        run: make build
+
+      - name: Run Daml tests
+        run: make test
+
+      - name: Check Canton runtime
+        run: dpm sandbox --help
+
+      - name: Run two-participant sandbox smoke test
+        timeout-minutes: 5
+        env:
+          SANDBOX_LOG_DIR: ${{ runner.temp }}/canton-sandbox-logs
+        run: make sandbox-smoke
+
+      - name: Upload sandbox logs on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: canton-sandbox-logs
+          path: ${{ runner.temp }}/canton-sandbox-logs/
+          if-no-files-found: ignore
+          retention-days: 7

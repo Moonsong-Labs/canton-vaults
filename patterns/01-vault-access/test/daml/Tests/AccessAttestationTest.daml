@@ -1,0 +1,87 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Tests.AccessAttestationTest where
+
+import DA.List (sort)
+import Daml.Script
+
+import AccessAttestation
+import AccessRequest qualified as Request
+import AttestationInfo (AttestationInfo)
+import VaultAccess (VaultAccess(..))
+
+testCreateAndRevokeAttestation : Script ()
+testCreateAndRevokeAttestation = script do
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+
+  attestationCid <- submit manager $ createCmd AccessAttestation with
+    manager
+    depositor
+    vaultIds = ["vault-001", "vault-002"]
+    evidenceHash = Some "sha256:test-kyb-evidence"
+
+  Some attestation <- queryContractId depositor attestationCid
+  assertMsg "attestation preserves the evidence hash"
+    (attestation.evidenceHash == Some "sha256:test-kyb-evidence")
+
+  submit manager $ exerciseCmd attestationCid Revoke
+  revoked <- queryContractId depositor attestationCid
+  assertMsg "revoked attestation is archived" (revoked == None)
+
+testStrangerCannotRevokeAttestation : Script ()
+testStrangerCannotRevokeAttestation = script do
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+  stranger <- allocateParty "Stranger"
+
+  attestationCid <- submit manager $ createCmd AccessAttestation with
+    manager
+    depositor
+    vaultIds = ["vault-001"]
+    evidenceHash = None
+  -- Disclosure isolates the authorization check from contract visibility.
+  Some attestationDisclosure <- queryDisclosure depositor attestationCid
+
+  submitMustFail (actAs stranger <> disclose attestationDisclosure) $
+    exerciseCmd attestationCid Revoke
+
+-- Requests in the same batch can receive different decisions from the manager.
+testRequestAccessCreatesOneRequestPerVault : Script ()
+testRequestAccessCreatesOneRequestPerVault = script do
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+  attestationCid <- submit manager $ createCmd AccessAttestation with
+    manager; depositor; vaultIds = ["vault-001", "vault-002", "vault-003"]; evidenceHash = None
+
+  [firstRequestCid, secondRequestCid] <- submit depositor $
+    exerciseCmd attestationCid RequestAccess with
+      requestedVaultIds = ["vault-001", "vault-003"]
+  requests <- query @Request.AccessRequest manager
+  assertMsg "requests cover the selected vaults"
+    (sort (map (\(_, r) -> r.vaultId) requests) == ["vault-001", "vault-003"])
+  assertMsg "requests preserve the manager and depositor"
+    (all (\(_, r) -> r.manager == manager && r.depositor == depositor) requests)
+  [] <- query @VaultAccess depositor
+  Some _ <- queryContractId depositor attestationCid
+
+  submitMustFail depositor $ exerciseCmd attestationCid RequestAccess with
+    requestedVaultIds = ["vault-004"]
+  submitMustFail depositor $ exerciseCmd attestationCid RequestAccess with
+    requestedVaultIds = []
+  submitMustFail depositor $ exerciseCmd attestationCid RequestAccess with
+    requestedVaultIds = ["vault-001", "vault-001"]
+  submitMustFail manager $ exerciseCmd attestationCid RequestAccess with
+    requestedVaultIds = ["vault-001"]
+
+  accessCid <- submit manager $ exerciseCmd firstRequestCid Request.Accept with
+    attestationCid = toInterfaceContractId @AttestationInfo attestationCid
+  Some access <- queryContractId depositor accessCid
+  assertMsg "only the accepted vault receives permission" (access.vaultId == "vault-001")
+  None <- queryContractId depositor firstRequestCid
+  Some _ <- queryContractId depositor secondRequestCid
+  submit manager $ exerciseCmd secondRequestCid Request.Reject
+  None <- queryContractId depositor secondRequestCid
+  accesses <- query @VaultAccess depositor
+  assertMsg "rejection creates no additional permission" (length accesses == 1)

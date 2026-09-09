@@ -1,0 +1,20 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module IDepositPolicy where
+
+data DepositPolicyView = DepositPolicyView with
+  manager : Party
+    deriving (Eq, Show)
+
+interface IDepositPolicy where
+  viewtype DepositPolicyView
+
+  checkDeposit : Decimal -> Update ()
+
+  nonconsuming choice CheckDeposit : ()
+    with
+      amount : Decimal
+    controller (view this).manager
+    do
+      checkDeposit this amount

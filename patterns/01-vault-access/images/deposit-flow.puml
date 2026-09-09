@@ -1,0 +1,75 @@
+@startuml deposit-flow
+<style>
+activityDiagram {
+  FontName Inter
+  FontSize 14
+  BackgroundColor #FFFFFF
+  activity {
+    BackgroundColor #F1F5F9
+    LineColor #CBD5E1
+    LineThickness 1
+    RoundCorner 12
+    FontColor #1E293B
+    Padding 14
+    Margin 12
+  }
+  arrow {
+    LineColor #64748B
+    LineThickness 1.5
+    FontColor #64748B
+    FontSize 12
+  }
+  swimlane {
+    LineColor #E2E8F0
+    FontColor #334155
+    FontStyle bold
+  }
+  circle {
+    BackgroundColor #64748B
+    LineColor #64748B
+  }
+  partition {
+    BackgroundColor #F0FDFA
+    LineColor #99D6CC
+    FontColor #0F766E
+    RoundCorner 12
+  }
+  .decision {
+    BackgroundColor #EFF6FF
+    LineColor #93C5FD
+    FontColor #1E40AF
+  }
+  .settlement {
+    BackgroundColor #CCFBF1
+    LineColor #5BBBA9
+    FontColor #115E59
+  }
+}
+</style>
+
+|Manager|
+|Depositor|
+
+|Manager|
+start
+:**1. Approve general access**\nCreate AccessAttestation\nafter off-ledger KYB; <<decision>>
+:**2. Grant per-vault access**\nCreate VaultAccess\nreferencing the attestation; <<decision>>
+-> Access granted;
+
+|Depositor|
+:**3. Request a deposit**\nExercise Deposit on VaultAccess; <<decision>>
+:Fetch active **AccessAttestation**\nCheck manager and depositor;
+:Lock tokens in an allocation;
+:Create **DepositRequest**;
+-> Request ready;
+
+|Manager|
+:**4. Accept the deposit**\nExercise AcceptDeposit\non DepositRequest; <<decision>>
+:Fetch active **AccessAttestation**\nCheck manager and depositor;
+partition "" {
+  :**Atomic settlement**\nTransfer locked tokens\nto **vault treasury**; <<settlement>>
+  :Mint **Share**\nfor the **depositor**; <<settlement>>
+}
+stop
+
+@enduml

@@ -1,0 +1,37 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module DepositRequest where
+
+-- The proposal fixes the amount the manager may accept.
+template DepositRequest
+  with
+    manager : Party
+    depositor : Party
+    amount : Decimal
+  where
+    signatory depositor
+    observer manager
+    ensure amount > 0.0
+
+    choice Cancel : ()
+      controller depositor
+      do pure ()
+
+    choice Reject : ()
+      controller manager
+      do pure ()
+
+    choice Settle : Decimal
+      controller manager
+      do
+        create DepositReceipt with manager; depositor; amount
+        pure amount
+
+template DepositReceipt
+  with
+    manager : Party
+    depositor : Party
+    amount : Decimal
+  where
+    signatory manager, depositor

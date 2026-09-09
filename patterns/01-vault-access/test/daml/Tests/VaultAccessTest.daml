@@ -1,0 +1,51 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Tests.VaultAccessTest where
+
+import Daml.Script
+
+import AccessAttestation (AccessAttestation(..))
+import AttestationInfo
+import VaultAccess
+
+testCreateAndRevoke : Script ()
+testCreateAndRevoke = script do
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+
+  attestationCid <- submit manager $ createCmd AccessAttestation with
+    manager; depositor; vaultIds = ["vault-001"]; evidenceHash = Some "sha256:test-kyb-evidence"
+  accessCid <- submit manager $ createCmd VaultAccess with
+    vaultId = "vault-001"
+    manager
+    depositor
+    attestationCid = toInterfaceContractId @AttestationInfo attestationCid
+
+  Some access <- queryContractId depositor accessCid
+  assertMsg "vault access should reference the attestation"
+    (access.attestationCid == toInterfaceContractId @AttestationInfo attestationCid)
+
+  _ <- submit manager $ exerciseCmd accessCid Revoke
+  archivedAccess <- queryContractId depositor accessCid
+  case archivedAccess of
+    None -> pure ()
+    Some _ -> fail "revoked vault access should be archived"
+
+testStrangerCannotRevoke : Script ()
+testStrangerCannotRevoke = script do
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+  stranger <- allocateParty "Stranger"
+
+  attestationCid <- submit manager $ createCmd AccessAttestation with
+    manager; depositor; vaultIds = ["vault-001"]; evidenceHash = None
+  accessCid <- submit manager $ createCmd VaultAccess with
+    vaultId = "vault-001"
+    manager
+    depositor
+    attestationCid = toInterfaceContractId @AttestationInfo attestationCid
+  Some accessDisclosure <- queryDisclosure depositor accessCid
+
+  submitMustFail (actAs stranger <> disclose accessDisclosure) $
+    exerciseCmd accessCid Revoke

@@ -1,0 +1,14 @@
+The DAR files in this directory are the Canton Network token standard
+interface packages, version 1.0.0, built from the Splice project:
+
+  https://github.com/canton-network/splice (directory: token-standard)
+
+Splice is licensed under the Apache License, Version 2.0. These files are
+redistributed unmodified under that license. A copy of the license is available
+at https://www.apache.org/licenses/LICENSE-2.0.
+
+Packages:
+  splice-api-token-allocation-instruction-v2-1.0.0.dar
+  splice-api-token-allocation-v2-1.0.0.dar
+  splice-api-token-holding-v2-1.0.0.dar
+  splice-api-token-metadata-v1-1.0.0.dar

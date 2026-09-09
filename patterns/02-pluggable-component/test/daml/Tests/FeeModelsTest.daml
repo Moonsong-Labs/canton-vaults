@@ -1,0 +1,77 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Tests.FeeModelsTest where
+
+import Daml.Script
+
+import IFee
+import FlatFee
+import PercentageFee
+import TieredFee
+
+testFlatFee : Script ()
+testFlatFee = script do
+  manager <- allocateParty "manager"
+  feeCid <- submit manager $ createCmd FlatFee with manager, amount = 5.0
+  fee <- submit manager $
+    exerciseCmd (toInterfaceContractId @IFee feeCid) CalculateFee with
+      requester = manager
+      amount = 1000.0
+  assertMsg "flat fee is the configured amount" (fee == 5.0)
+
+testPercentageFee : Script ()
+testPercentageFee = script do
+  manager <- allocateParty "manager"
+  feeCid <- submit manager $ createCmd PercentageFee with manager, rate = 0.02
+  fee <- submit manager $
+    exerciseCmd (toInterfaceContractId @IFee feeCid) CalculateFee with
+      requester = manager
+      amount = 1000.0
+  assertMsg "percentage fee is 2% of the amount" (fee == 20.0)
+
+testTieredFee : Script ()
+testTieredFee = script do
+  manager <- allocateParty "manager"
+  feeCid <- submit manager $ createCmd TieredFee with
+    manager
+    tiers = [(0.0, 0.02), (1000.0, 0.01)]
+  fee <- submit manager $
+    exerciseCmd (toInterfaceContractId @IFee feeCid) CalculateFee with
+      requester = manager
+      amount = 1000.0
+  assertMsg "reaching the second tier applies 1% to the full amount" (fee == 10.0)
+
+demoTiers : [(Decimal, Decimal)]
+demoTiers = [(0.0, 0.05), (1000.0, 0.02), (10000.0, 0.01)]
+
+testTieredFeeBands : Script ()
+testTieredFeeBands = script do
+  manager <- allocateParty "manager"
+  feeCid <- submit manager $ createCmd TieredFee with manager, tiers = demoTiers
+  let feeIfaceCid = toInterfaceContractId @IFee feeCid
+
+  small <- submit manager $ exerciseCmd feeIfaceCid CalculateFee with requester = manager, amount = 500.0
+  mid <- submit manager $ exerciseCmd feeIfaceCid CalculateFee with requester = manager, amount = 2000.0
+  large <- submit manager $ exerciseCmd feeIfaceCid CalculateFee with requester = manager, amount = 20000.0
+
+  assertMsg "first tier" (small == 25.0)
+  assertMsg "second tier" (mid == 40.0)
+  assertMsg "third tier" (large == 200.0)
+
+testTiersMustBeSorted : Script ()
+testTiersMustBeSorted = script do
+  manager <- allocateParty "manager"
+  submitMustFail manager $ createCmd TieredFee with
+    manager
+    tiers = [(1000.0, 0.02), (0.0, 0.05)]
+
+testFirstTierMustStartAtZero : Script ()
+testFirstTierMustStartAtZero = script do
+  manager <- allocateParty "manager"
+  submitMustFail manager $ createCmd TieredFee with manager, tiers = [(100.0, 0.05)]
+
+testTiersMustNotBeEmpty : Script ()
+testTiersMustNotBeEmpty = script do
+  manager <- allocateParty "manager"
+  submitMustFail manager $ createCmd TieredFee with manager, tiers = []

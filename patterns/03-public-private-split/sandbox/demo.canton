@@ -1,0 +1,93 @@
+import com.daml.ledger.api.v2.event.CreatedEvent
+import com.daml.ledger.api.v2.transaction.Transaction
+import com.daml.ledger.api.v2.transaction_filter.TransactionShape
+import com.digitalasset.canton.admin.api.client.data.StaticSynchronizerParameters
+import com.digitalasset.canton.config.NonNegativeDuration
+import com.digitalasset.canton.config.RequireTypes.PositiveInt
+import com.digitalasset.canton.protocol.LfContractId
+import com.digitalasset.canton.version.ProtocolVersion
+
+nodes.local.start()
+bootstrap.synchronizer(
+  synchronizerName = "vault",
+  sequencers = Seq(sequencer),
+  mediators = Seq(mediator),
+  synchronizerOwners = Seq(sequencer, mediator),
+  synchronizerThreshold = PositiveInt.one,
+  staticSynchronizerParameters = StaticSynchronizerParameters.defaultsWithoutKMS(ProtocolVersion.v35)
+)
+depositorPN.synchronizers.connect_local(sequencer, alias = "vault")
+managerPN.synchronizers.connect_local(sequencer, alias = "vault")
+
+val pattern = "patterns/03-public-private-split"
+depositorPN.dars.upload(s"$pattern/public/.daml/dist/deposit-public-0.1.0.dar")
+managerPN.dars.upload(s"$pattern/public/.daml/dist/deposit-public-0.1.0.dar")
+managerPN.dars.upload(s"$pattern/private/.daml/dist/deposit-policy-0.1.0.dar")
+
+val depositor = depositorPN.parties.enable("Depositor", synchronizer = Some("vault"), synchronizeParticipants = Seq(depositorPN, managerPN))
+val manager = managerPN.parties.enable("Manager", synchronizer = Some("vault"), synchronizeParticipants = Seq(depositorPN, managerPN))
+val publicPackage = depositorPN.packages.find_by_module("DepositRequest").head.packageId
+val policyPackage = managerPN.packages.find_by_module("DepositPolicy").head.packageId
+val publicPackagesBefore = depositorPN.packages.list().map(_.packageId).toSet
+require(!publicPackagesBefore.contains(policyPackage), "Policy package leaked to depositor PN")
+
+def created(tx: Transaction, entity: String): CreatedEvent =
+  tx.events.flatMap(_.event.created).find(_.getTemplateId.entityName == entity).getOrElse(
+    sys.error(s"Missing $entity creation in ${tx.updateId}")
+  )
+
+val policyTx = managerPN.ledger_api.commands.submit(Seq(manager), Seq(
+  ledger_api_utils.create(policyPackage, "DepositPolicy", "DepositPolicy", Map("manager" -> manager, "maxDeposit" -> 2000.0))
+))
+val policy = created(policyTx, "DepositPolicy")
+val processorTx = managerPN.ledger_api.commands.submit(Seq(manager), Seq(
+  ledger_api_utils.create(publicPackage, "DepositProcessor", "DepositProcessor", Map(
+    "manager" -> manager,
+    "depositor" -> depositor,
+    "policyCid" -> LfContractId.assertFromString(policy.contractId)
+  ))
+))
+val processor = created(processorTx, "DepositProcessor")
+
+val requestTx = depositorPN.ledger_api.commands.submit(Seq(depositor), Seq(
+  ledger_api_utils.create(publicPackage, "DepositRequest", "DepositRequest", Map(
+    "manager" -> manager, "depositor" -> depositor,
+    "amount" -> 1500.0
+  ))
+), optTimeout = Some(NonNegativeDuration.ofSeconds(30)))
+val request = created(requestTx, "DepositRequest")
+
+val accepted = managerPN.ledger_api.commands.submit(Seq(manager), Seq(
+  ledger_api_utils.exercise("Accept", Map(
+    "requestCid" -> LfContractId.assertFromString(request.contractId)
+  ), processor)
+), optTimeout = Some(NonNegativeDuration.ofSeconds(30)), transactionShape = TransactionShape.TRANSACTION_SHAPE_LEDGER_EFFECTS)
+
+// The depositor's own API proves which events reached its participant.
+val publicTx = depositorPN.ledger_api.updates.transactions(
+  Set(depositor), completeAfter = PositiveInt.one,
+  beginOffsetExclusive = requestTx.offset,
+  timeout = NonNegativeDuration.ofSeconds(30),
+  transactionShape = TransactionShape.TRANSACTION_SHAPE_LEDGER_EFFECTS
+).head.transaction
+val managerExercises = accepted.events.flatMap(_.event.exercised)
+val managerChoices = managerExercises.map(_.choice)
+val publicExercises = publicTx.events.flatMap(_.event.exercised)
+require(managerChoices == Seq("Accept", "CheckDeposit", "Settle"), s"Unexpected manager view: $managerChoices")
+require(managerExercises(1).getInterfaceId.entityName == "IDepositPolicy", "Policy check must use IDepositPolicy")
+require(publicExercises.map(_.choice) == Seq("Settle"), s"Private exercises leaked: $publicExercises")
+val receipt = created(publicTx, "DepositReceipt")
+require(receipt.contractId == created(accepted, "DepositReceipt").contractId, "Receipt mismatch between PNs")
+require(publicTx.updateId == accepted.updateId, "Settlement must share the acceptance transaction ID")
+val amount = BigDecimal(receipt.getCreateArguments.fields.find(_.label == "amount").get.getValue.getNumeric)
+require(amount == BigDecimal(1500), s"Unexpected receipt amount: $amount")
+val depositorContracts = depositorPN.ledger_api.state.acs.of_party(depositor)
+require(depositorContracts.forall(_.event.contractId != request.contractId), "Request was not consumed")
+require(depositorContracts.exists(_.event.contractId == processor.contractId), "Depositor must see the public processor")
+require(depositorContracts.forall(_.event.contractId != policy.contractId), "Policy contract leaked to depositor")
+require(depositorPN.packages.list().map(_.packageId).toSet == publicPackagesBefore, "Depositor packages changed during settlement")
+
+println(s"Manager choices: ${managerChoices.mkString(", ")}")
+println(s"Depositor choices: ${publicExercises.map(_.choice).mkString(", ")}")
+println(s"Shared settlement transaction: ${publicTx.updateId}")
+println("Two-PN deposit passed: amount 1500, private policy package absent from depositor PN.")

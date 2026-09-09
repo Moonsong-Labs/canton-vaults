@@ -1,0 +1,57 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Tests.DepositTest where
+
+import Daml.Script
+import DepositRequest
+import DepositProcessor
+import DepositPolicy
+import IDepositPolicy
+
+testDeposit : Script ()
+testDeposit = script do
+  manager <- allocateParty "manager"
+  depositor <- allocateParty "depositor"
+  policyCid <- submit manager $ createCmd DepositPolicy with manager; maxDeposit = 2000.0
+  processorCid <- submit manager $ createCmd DepositProcessor with
+    manager; depositor
+    policyCid = toInterfaceContractId @IDepositPolicy policyCid
+
+  -- The depositor sees the public processor while its policy stays manager-only.
+  Some _ <- queryContractId depositor processorCid
+  policy <- queryContractId depositor policyCid
+  assertMsg "policy is private to the manager" (policy == None)
+
+  -- Each submission acts only as the party responsible for that step.
+  requestCid <- submit depositor $ createCmd DepositRequest with
+    manager; depositor; amount = 1500.0
+  result <- submit manager $ exerciseCmd processorCid Accept with
+    requestCid
+
+  assertMsg "accept returns the settled amount" (result == 1500.0)
+  receipts <- query @DepositReceipt depositor
+  assertMsg "depositor receives the public receipt"
+    (map snd receipts == [DepositReceipt with manager; depositor; amount = 1500.0])
+  managerReceipts <- query @DepositReceipt manager
+  assertMsg "both parties see the same receipt" (managerReceipts == receipts)
+  pending <- queryContractId depositor requestCid
+  assertMsg "settlement consumes the request" (pending == None)
+
+testPolicyLimit : Script ()
+testPolicyLimit = script do
+  manager <- allocateParty "manager"
+  depositor <- allocateParty "depositor"
+  policyCid <- submit manager $ createCmd DepositPolicy with manager; maxDeposit = 2000.0
+  processorCid <- submit manager $ createCmd DepositProcessor with
+    manager; depositor
+    policyCid = toInterfaceContractId @IDepositPolicy policyCid
+  requestCid <- submit depositor $ createCmd DepositRequest with
+    manager; depositor; amount = 2500.0
+
+  -- A failed policy check leaves the request available for cancellation.
+  submitMustFail manager $ exerciseCmd processorCid Accept with
+    requestCid
+  receipts <- query @DepositReceipt depositor
+  assertMsg "failed acceptance creates no receipt" (null receipts)
+  submit depositor $ exerciseCmd requestCid Cancel

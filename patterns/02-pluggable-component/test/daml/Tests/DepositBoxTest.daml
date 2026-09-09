@@ -1,0 +1,39 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Tests.DepositBoxTest where
+
+import Daml.Script
+
+import DepositBox
+import IFee
+import FlatFee
+import PercentageFee
+import TieredFee
+
+testDepositBoxesWithDifferentFees : Script ()
+testDepositBoxesWithDifferentFees = script do
+  manager <- allocateParty "manager"
+  flatCid <- submit manager $ createCmd FlatFee with manager, amount = 5.0
+  percentageCid <- submit manager $ createCmd PercentageFee with manager, rate = 0.02
+  tieredCid <- submit manager $ createCmd TieredFee with
+    manager
+    tiers = [(0.0, 0.02), (1000.0, 0.01)]
+
+  -- Interface IDs let all three models share the same box creation and deposit
+  -- code. Results retain the list's flat, percentage, tiered order.
+  boxCids <- forA
+    [ toInterfaceContractId @IFee flatCid
+    , toInterfaceContractId @IFee percentageCid
+    , toInterfaceContractId @IFee tieredCid
+    ] $ \feeModelCid -> submit manager $ createCmd DepositBox with manager, feeModelCid
+
+  results <- forA boxCids $ \boxCid ->
+    submit manager $ exerciseCmd boxCid Deposit with amount = 1500.0
+
+  assertMsg "each box uses its configured fee model"
+    (results ==
+      [ DepositResult with grossAmount = 1500.0, feeAmount = 5.0, netAmount = 1495.0
+      , DepositResult with grossAmount = 1500.0, feeAmount = 30.0, netAmount = 1470.0
+      , DepositResult with grossAmount = 1500.0, feeAmount = 15.0, netAmount = 1485.0
+      ])

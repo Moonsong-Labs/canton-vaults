@@ -1,0 +1,33 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module DepositBox where
+
+import IFee
+
+data DepositResult = DepositResult with
+  grossAmount : Decimal
+  feeAmount : Decimal
+  netAmount : Decimal
+    deriving (Eq, Show)
+
+-- A simulated deposit keeps the example focused on fee model configuration.
+template DepositBox
+  with
+    manager : Party
+    feeModelCid : ContractId IFee
+  where
+    signatory manager
+
+    nonconsuming choice Deposit : DepositResult
+      with
+        amount : Decimal
+      controller manager
+      do
+        feeAmount <- exercise feeModelCid CalculateFee with
+          requester = manager
+          amount
+        pure DepositResult with
+          grossAmount = amount
+          feeAmount
+          netAmount = amount - feeAmount

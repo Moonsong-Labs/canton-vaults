@@ -1,0 +1,60 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Tests.DepositInfoTest where
+
+import Daml.Script
+import Splice.Api.Token.HoldingV2 (Account(..), InstrumentId(..))
+
+import DepositInfo
+
+-- A vault template. Readers never import this module; they read DepositInfo.
+template TestVault
+  with
+    vaultId : Text
+    manager : Party
+    depositor : Party
+    acceptedInstrument : InstrumentId
+    treasury : Account
+    minDeposit : Decimal
+  where
+    signatory manager
+    observer depositor
+
+    interface instance DepositInfo for TestVault where
+      view = DepositView with vaultId, manager, acceptedInstrument, treasury, minDeposit
+
+testVaultId : Text
+testVaultId = "vault-001"
+
+setup : () -> Script (Party, Party, Party, ContractId TestVault)
+setup () = script do
+  manager <- allocateParty "manager"
+  depositor <- allocateParty "depositor"
+  issuer <- allocateParty "issuer"
+  cid <- submit manager $ createCmd TestVault with
+    vaultId = testVaultId
+    manager
+    depositor
+    acceptedInstrument = InstrumentId with admin = issuer, id = "USDC"
+    treasury = Account with owner = Some manager, provider = None, id = "vault:" <> testVaultId
+    minDeposit = 100.0
+  pure (manager, depositor, issuer, cid)
+
+-- A stakeholder reads the view through the interface contract ID.
+testDepositInfoView : Script ()
+testDepositInfoView = script do
+  (manager, depositor, _, cid) <- setup ()
+  Some vaultView <- queryInterfaceContractId depositor (toInterfaceContractId @DepositInfo cid)
+  assertMsg "vault id is exposed" (vaultView.vaultId == testVaultId)
+  assertMsg "manager is exposed" (vaultView.manager == manager)
+  assertMsg "minimum deposit is exposed" (vaultView.minDeposit == 100.0)
+
+-- Views follow contract visibility: a party that is neither signatory nor
+-- observer sees nothing, view included.
+testViewFollowsVisibility : Script ()
+testViewFollowsVisibility = script do
+  (_, _, _, cid) <- setup ()
+  stranger <- allocateParty "stranger"
+  None <- queryInterfaceContractId stranger (toInterfaceContractId @DepositInfo cid)
+  pure ()

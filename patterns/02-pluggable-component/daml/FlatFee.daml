@@ -1,0 +1,18 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module FlatFee where
+
+import IFee
+
+template FlatFee
+  with
+    manager : Party
+    amount : Decimal
+  where
+    signatory manager
+    ensure amount >= 0.0
+
+    interface instance IFee for FlatFee where
+      view = FeeView with manager, label = "flat"
+      calculateFee _ = amount

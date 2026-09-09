@@ -1,0 +1,9 @@
+sdk-version: 3.5.2
+name: fees-interface
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+build-options:
+  - --target=2.3

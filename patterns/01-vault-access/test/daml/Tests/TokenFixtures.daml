@@ -1,0 +1,548 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Tests.TokenFixtures where
+
+import DA.List (dedup, sort)
+import DA.Map qualified as Map
+import DA.Optional (fromSomeNote)
+import DA.TextMap qualified as TextMap
+
+import Daml.Script
+
+import Splice.Api.Token.AllocationInstructionV2
+import Splice.Api.Token.AllocationV2
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.MetadataV1
+
+accountOwner : Account -> Party
+accountOwner account = fromSomeNote "test holdings require an account owner" account.owner
+
+basicAccount : Party -> Account
+basicAccount owner = Account with
+  owner = Some owner
+  provider = None
+  id = ""
+
+emptyExtraArgs : ExtraArgs
+emptyExtraArgs = ExtraArgs with
+  context = emptyChoiceContext
+  meta = emptyMetadata
+
+data TestUsdcRegistry = TestUsdcRegistry with
+  issuer : Party
+  instrumentId : InstrumentId
+  allocationFactoryCid : ContractId TestUsdcRules
+
+testAllocationFactoryCid : TestUsdcRegistry -> ContractId AllocationFactory
+testAllocationFactoryCid registry = toInterfaceContractId @AllocationFactory registry.allocationFactoryCid
+
+testSettlementFactoryCid : TestUsdcRegistry -> ContractId SettlementFactory
+testSettlementFactoryCid registry = toInterfaceContractId @SettlementFactory registry.allocationFactoryCid
+
+allocateTestUsdcRegistry : Party -> Party -> Script TestUsdcRegistry
+allocateTestUsdcRegistry depositor manager = script do
+  issuer <- allocateParty "Circle"
+  let instrumentId = InstrumentId with
+        admin = issuer
+        id = "USDC"
+  allocationFactoryCid <- submit issuer $ createCmd TestUsdcRules with
+    admin = issuer
+    instrumentId
+    observers = [depositor, manager]
+  pure TestUsdcRegistry with
+    issuer
+    instrumentId
+    allocationFactoryCid
+
+issueHolding : TestUsdcRegistry -> Party -> InstrumentId -> Decimal -> Script (ContractId TestHolding)
+issueHolding registry owner instrumentId amount =
+  issueHoldingForAccount registry (basicAccount owner) instrumentId amount
+
+issueHoldingForAccount : TestUsdcRegistry -> Account -> InstrumentId -> Decimal -> Script (ContractId TestHolding)
+issueHoldingForAccount registry account instrumentId amount =
+  submit (actAs [registry.issuer, owner]) $ createCmd TestHolding with
+    admin = registry.issuer
+    account
+    instrumentId
+    amount
+    lock = None
+    observers = []
+  where
+    owner = accountOwner account
+
+releaseLockedHolding : ContractId TestHolding -> Update (ContractId TestHolding, HoldingView)
+releaseLockedHolding holdingCid = do
+  holding <- fetch holdingCid
+  let holdingView = view (toInterface @Holding holding)
+  archive holdingCid
+  releasedHoldingCid <- create TestHolding with
+    admin = holding.admin
+    account = holding.account
+    instrumentId = holding.instrumentId
+    amount = holding.amount
+    lock = None
+    observers = []
+  pure (releasedHoldingCid, holdingView)
+
+fundingFor : Text -> Optional (TextMap.TextMap Decimal) -> Decimal
+fundingFor instrumentId funding = case funding of
+  Some amounts -> case TextMap.lookup instrumentId amounts of
+    Some amount -> amount
+    None -> 0.0
+  None -> 0.0
+
+senderSide : TransferLeg -> TransferLegSide
+senderSide TransferLeg{..} = TransferLegSide with
+  transferLegId
+  side = SenderSide
+  otherside = receiver
+  amount
+  instrumentId
+  meta
+
+receiverSide : TransferLeg -> TransferLegSide
+receiverSide TransferLeg{..} = TransferLegSide with
+  transferLegId
+  side = ReceiverSide
+  otherside = sender
+  amount
+  instrumentId
+  meta
+
+allocationAuthorizesSide : Account -> [TransferLeg] -> TransferLegSide -> Bool
+allocationAuthorizesSide authorizer transferLegs transferLegSide =
+  any
+    (\transferLeg -> case transferLegSide.side of
+      SenderSide ->
+        transferLeg.sender == authorizer
+          && senderSide transferLeg == transferLegSide
+      ReceiverSide ->
+        transferLeg.receiver == authorizer
+          && receiverSide transferLeg == transferLegSide)
+    transferLegs
+
+expectedSettlementSides : SettlementInfo -> [TransferLeg] -> [TransferLegSide]
+expectedSettlementSides settlement transferLegs =
+  if settlement.id == "vault-deposit"
+  then map senderSide transferLegs
+  else concatMap (\transferLeg -> [senderSide transferLeg, receiverSide transferLeg]) transferLegs
+
+totalAmount : [TransferLegSide] -> Decimal
+totalAmount = foldl (\total side -> total + side.amount) 0.0
+
+validateFinalizedAllocation
+  : InstrumentId
+  -> (FinalizedAllocation, AllocationView)
+  -> Update ()
+validateFinalizedAllocation instrumentId (finalizedAllocation, allocationView) = do
+  let transferLegSides =
+        allocationView.allocation.transferLegSides
+          <> finalizedAllocation.extraTransferLegSides
+  assertMsg "allocation must authorize transfer legs" (not (null transferLegSides))
+  case allocationView.holdingCids of
+    [] -> do
+      assertMsg "receiver allocation must reserve empty iterated funding"
+        (allocationView.allocation.nextIterationFunding == Some TextMap.empty)
+      assertMsg "receiver allocation must authorize incoming transfer legs"
+        (all (\side -> side.side == ReceiverSide) transferLegSides)
+    [holdingCid] -> do
+      holding <- fetch holdingCid
+      let holdingView = view holding
+      assertMsg "sender holding belongs to a different account"
+        (holdingView.account == allocationView.allocation.authorizer)
+      assertMsg "sender holding uses an unsupported instrument"
+        (holdingView.instrumentId == instrumentId)
+      assertMsg "sender holding is not locked"
+        (holdingView.lock /= None)
+      assertMsg "sender allocation funding must match the locked holding"
+        (fundingFor instrumentId.id allocationView.allocation.nextIterationFunding
+          == holdingView.amount)
+      assertMsg "sender allocation must authorize outgoing transfer legs"
+        (all (\side -> side.side == SenderSide) transferLegSides)
+      assertMsg "sender authorization must match the locked holding"
+        (totalAmount transferLegSides == holdingView.amount)
+    _ -> fail "test allocation must contain zero or one holding"
+
+template TestHolding
+  with
+    admin : Party
+    account : Account
+    instrumentId : InstrumentId
+    amount : Decimal
+    lock : Optional Lock
+    observers : [Party]
+  where
+    signatory admin, accountOwner account
+    observer observers
+    ensure amount > 0.0 && account.owner /= None
+
+    interface instance Holding for TestHolding where
+      view = HoldingView with
+        account
+        instrumentId
+        amount
+        lock
+        meta = emptyMetadata
+
+template TestSenderAllocation
+  with
+    admin : Party
+    settlement : SettlementInfo
+    allocation : AllocationSpecification
+    lockedHoldingCid : ContractId TestHolding
+    createdAt : Time
+  where
+    signatory admin, accountOwner allocation.authorizer
+    observer settlement.executors
+
+    interface instance Allocation for TestSenderAllocation where
+      view = AllocationView with
+        originalAllocationCid = None
+        settlement
+        allocation
+        holdingCids = [toInterfaceContractId @Holding lockedHoldingCid]
+        createdAt
+        numIterations = 0
+        expiresAt = allocation.settlementDeadline
+        availableActions = Map.fromList
+          ([ (AA_Settle, [settlement.executors])
+           , (AA_Cancel, [settlement.executors])
+           ] <> if allocation.committed
+                then []
+                else [(AA_Withdraw, [[accountOwner allocation.authorizer]])])
+        meta = emptyMetadata
+
+      allocation_settleExtraObservers _arg = settlement.executors
+      allocation_cancelExtraObservers _arg = settlement.executors
+      allocation_withdrawExtraObservers _arg = settlement.executors
+
+      allocation_settleImpl self arg = do
+        assertMsg "settlement actors must match the allocation executors"
+          (arg.actors == settlement.executors)
+        assertMsg "test allocation requires deferred transfer legs"
+          (allocation.transferLegSides == [])
+        assertMsg "test allocation requires iterated funding"
+          (allocation.nextIterationFunding /= None)
+        assertMsg "settlement must complete the allocation"
+          (arg.nextIterationFunding == None)
+
+        lockedHolding <- fetch lockedHoldingCid
+        let transferLegSides = arg.extraTransferLegSides
+        assertMsg "settlement must include outgoing transfer legs" (not (null transferLegSides))
+        assertMsg "settlement amount must match the locked holding"
+          (totalAmount transferLegSides == lockedHolding.amount)
+
+        _ <- forA transferLegSides $ \side -> do
+          assertMsg "settlement legs must debit the allocating account"
+            (side.side == SenderSide && side.amount > 0.0)
+          assertMsg "settlement legs must use the allocated instrument"
+            (side.instrumentId == lockedHolding.instrumentId.id)
+
+        _ <- if settlement.id == "vault-deposit" then
+          forA transferLegSides $ \side ->
+            create TestHolding with
+              admin
+              account = side.otherside
+              instrumentId = lockedHolding.instrumentId
+              amount = side.amount
+              lock = None
+              observers = settlement.executors
+        else
+          pure []
+        archive lockedHoldingCid
+        archive self
+        pure AllocationResult with
+          output = AllocationResult_Settled with nextIterationAllocationCid = None
+          authorizerHoldingCids = TextMap.empty
+          meta = emptyMetadata
+
+      allocation_cancelImpl self arg = do
+        assertMsg "cancellation actors must match the allocation executors"
+          (arg.actors == settlement.executors)
+        (releasedHoldingCid, holdingView) <- releaseLockedHolding lockedHoldingCid
+        archive self
+        pure AllocationResult with
+          output = AllocationResult_Cancelled
+          authorizerHoldingCids = TextMap.fromList
+            [(holdingView.instrumentId.id, [toInterfaceContractId @Holding releasedHoldingCid])]
+          meta = emptyMetadata
+
+      allocation_withdrawImpl self arg = do
+        assertMsg "withdrawal actors must match the allocation authorizer"
+          (arg.actors == [accountOwner allocation.authorizer])
+        assertMsg "committed allocations cannot be withdrawn" (not allocation.committed)
+        (releasedHoldingCid, holdingView) <- releaseLockedHolding lockedHoldingCid
+        archive self
+        pure AllocationResult with
+          output = AllocationResult_Withdrawn
+          authorizerHoldingCids = TextMap.fromList
+            [(holdingView.instrumentId.id, [toInterfaceContractId @Holding releasedHoldingCid])]
+          meta = emptyMetadata
+
+template TestReceiverAllocation
+  with
+    admin : Party
+    settlement : SettlementInfo
+    allocation : AllocationSpecification
+    instrumentId : InstrumentId
+    createdAt : Time
+    cancelFails : Bool
+  where
+    signatory admin, accountOwner allocation.authorizer
+    observer settlement.executors
+
+    interface instance Allocation for TestReceiverAllocation where
+      view = AllocationView with
+        originalAllocationCid = None
+        settlement
+        allocation
+        holdingCids = []
+        createdAt
+        numIterations = 0
+        expiresAt = allocation.settlementDeadline
+        availableActions = Map.fromList
+          ([ (AA_Settle, [settlement.executors])
+           , (AA_Cancel, [settlement.executors])
+           ] <> if allocation.committed
+                then []
+                else [(AA_Withdraw, [[accountOwner allocation.authorizer]])])
+        meta = emptyMetadata
+
+      allocation_settleExtraObservers _arg = settlement.executors
+      allocation_cancelExtraObservers _arg = settlement.executors
+      allocation_withdrawExtraObservers _arg = settlement.executors
+
+      allocation_settleImpl self arg = do
+        assertMsg "settlement actors must match the allocation executors"
+          (arg.actors == settlement.executors)
+        assertMsg "receiver allocation requires deferred transfer legs"
+          (allocation.transferLegSides == [])
+        assertMsg "receiver allocation must reserve empty iterated funding"
+          (allocation.nextIterationFunding == Some TextMap.empty)
+        assertMsg "settlement must complete the allocation"
+          (arg.nextIterationFunding == None)
+
+        let transferLegSides = arg.extraTransferLegSides
+        assertMsg "settlement must include incoming transfer legs" (not (null transferLegSides))
+        outputHoldingCids <- forA transferLegSides $ \side -> do
+          assertMsg "settlement legs must credit the allocating account"
+            (side.side == ReceiverSide && side.amount > 0.0)
+          assertMsg "settlement legs must use the allocated instrument"
+            (side.instrumentId == instrumentId.id)
+          holdingCid <- create TestHolding with
+            admin
+            account = allocation.authorizer
+            instrumentId
+            amount = side.amount
+            lock = None
+            observers = settlement.executors
+          pure (toInterfaceContractId @Holding holdingCid)
+
+        archive self
+        pure AllocationResult with
+          output = AllocationResult_Settled with nextIterationAllocationCid = None
+          authorizerHoldingCids =
+            TextMap.fromList [(instrumentId.id, outputHoldingCids)]
+          meta = emptyMetadata
+
+      allocation_cancelImpl self arg = do
+        assertMsg "cancellation actors must match the allocation executors"
+          (arg.actors == settlement.executors)
+        assertMsg "test receiver allocation cancellation failed" (not cancelFails)
+        archive self
+        pure AllocationResult with
+          output = AllocationResult_Cancelled
+          authorizerHoldingCids = TextMap.empty
+          meta = emptyMetadata
+
+      allocation_withdrawImpl self arg = do
+        assertMsg "withdrawal actors must match the allocation authorizer"
+          (arg.actors == [accountOwner allocation.authorizer])
+        assertMsg "committed allocations cannot be withdrawn" (not allocation.committed)
+        archive self
+        pure AllocationResult with
+          output = AllocationResult_Withdrawn
+          authorizerHoldingCids = TextMap.empty
+          meta = emptyMetadata
+
+template TestUsdcRules
+  with
+    admin : Party
+    instrumentId : InstrumentId
+    observers : [Party]
+  where
+    signatory admin
+    observer observers
+
+    interface instance AllocationFactory for TestUsdcRules where
+      view = AllocationFactoryView with
+        admin
+        meta = emptyMetadata
+
+      allocationFactory_allocateExtraObservers arg = arg.settlement.executors
+
+      allocationFactory_allocateImpl _self arg = do
+        assertMsg "allocation actors must match the authorizer"
+          (arg.actors == [accountOwner arg.allocation.authorizer])
+        assertMsg "allocation uses an unsupported issuer"
+          (arg.allocation.admin == admin)
+        assertMsg "allocation must use deferred transfer legs"
+          (arg.allocation.transferLegSides == [])
+
+        case arg.inputHoldingCids of
+          [] -> do
+            assertMsg "receiver allocation must reserve empty iterated funding"
+              (arg.allocation.nextIterationFunding == Some TextMap.empty)
+            allocationCid <- create TestReceiverAllocation with
+              admin
+              settlement = arg.settlement
+              allocation = arg.allocation
+              instrumentId
+              createdAt = arg.requestedAt
+              cancelFails = False
+            pure AllocationInstructionResult with
+              output = AllocationInstructionResult_Completed with
+                allocationCid = toInterfaceContractId @Allocation allocationCid
+              authorizerChangeCids = TextMap.empty
+              meta = emptyMetadata
+          _ -> do
+            inputHoldings <- forA arg.inputHoldingCids fetch
+            let holdingViews = map view inputHoldings
+                grossAmount = fundingFor instrumentId.id arg.allocation.nextIterationFunding
+                inputAmount = foldl (\total holdingView -> total + holdingView.amount) 0.0 holdingViews
+            firstHoldingView <- case holdingViews of
+              [] -> fail "sender allocation requires at least one input holding"
+              holdingView :: _ -> pure holdingView
+            assertMsg "input holding belongs to a different account"
+              (all (\holdingView -> holdingView.account == arg.allocation.authorizer) holdingViews)
+            assertMsg "input holding uses an unsupported instrument"
+              (all (\holdingView -> holdingView.instrumentId == instrumentId) holdingViews)
+            assertMsg "input holding is already locked"
+              (all (\holdingView -> holdingView.lock == None) holdingViews)
+            assertMsg "allocation funding must be positive" (grossAmount > 0.0)
+            assertMsg "input holdings have insufficient funds" (inputAmount >= grossAmount)
+
+            _ <- forA arg.inputHoldingCids archive
+            lockedHoldingCid <- create TestHolding with
+              admin
+              account = firstHoldingView.account
+              instrumentId
+              amount = grossAmount
+              lock = Some Lock with
+                holders = admin :: arg.settlement.executors
+                expiresAt = arg.allocation.settlementDeadline
+                expiresAfter = None
+                context = Some "vault allocation"
+              observers = arg.settlement.executors
+            let changeAmount = inputAmount - grossAmount
+            changeCids <- if changeAmount > 0.0 then do
+              changeHoldingCid <- create TestHolding with
+                admin
+                account = firstHoldingView.account
+                instrumentId
+                amount = changeAmount
+                lock = None
+                observers = arg.settlement.executors
+              pure [toInterfaceContractId @Holding changeHoldingCid]
+            else
+              pure []
+            allocationCid <- create TestSenderAllocation with
+              admin
+              settlement = arg.settlement
+              allocation = arg.allocation
+              lockedHoldingCid
+              createdAt = arg.requestedAt
+            pure AllocationInstructionResult with
+              output = AllocationInstructionResult_Completed with
+                allocationCid = toInterfaceContractId @Allocation allocationCid
+              authorizerChangeCids =
+                if null changeCids
+                then TextMap.empty
+                else TextMap.fromList [(instrumentId.id, changeCids)]
+              meta = emptyMetadata
+
+      allocationFactory_publicFetchImpl _self _arg = pure AllocationFactoryView with
+        admin
+        meta = emptyMetadata
+
+    interface instance SettlementFactory for TestUsdcRules where
+      view = SettlementFactoryView with
+        admin
+        meta = emptyMetadata
+
+      settlementFactory_settleBatchExtraObservers arg = arg.settlement.executors
+
+      settlementFactory_settleBatchImpl _self arg = do
+        assertMsg "settlement actors must match the settlement executors"
+          (arg.actors == arg.settlement.executors)
+        assertMsg "settlement must include transfer legs" (not (null arg.transferLegs))
+        assertMsg "settlement must include allocations" (not (null arg.allocations))
+
+        allocationsWithViews <- forA arg.allocations $ \finalizedAllocation -> do
+          allocationContract <- fetch finalizedAllocation.allocationCid
+          pure (finalizedAllocation, view allocationContract)
+        let allocationCids =
+              map (\(finalizedAllocation, _) -> finalizedAllocation.allocationCid) allocationsWithViews
+            transferLegIds = map (\transferLeg -> transferLeg.transferLegId) arg.transferLegs
+            authorizedSides = concatMap
+              (\(finalizedAllocation, allocationView) ->
+                allocationView.allocation.transferLegSides
+                  <> finalizedAllocation.extraTransferLegSides)
+              allocationsWithViews
+            expectedSides = expectedSettlementSides arg.settlement arg.transferLegs
+        assertMsg "settlement allocations must be unique"
+          (length allocationCids == length (dedup allocationCids))
+        assertMsg "settlement transfer leg IDs must be unique"
+          (length transferLegIds == length (dedup transferLegIds))
+        assertMsg "settlement transfer legs must be positive"
+          (all (\transferLeg -> transferLeg.amount > 0.0) arg.transferLegs)
+        assertMsg "settlement transfer legs use an unsupported instrument"
+          (all (\transferLeg -> transferLeg.instrumentId == instrumentId.id) arg.transferLegs)
+        assertMsg "allocation belongs to a different settlement"
+          (all
+            (\(_, allocationView) -> allocationView.settlement == arg.settlement)
+            allocationsWithViews)
+        assertMsg "allocation uses an unsupported issuer"
+          (all
+            (\(_, allocationView) -> allocationView.allocation.admin == admin)
+            allocationsWithViews)
+        assertMsg "allocation must use deferred transfer legs"
+          (all
+            (\(_, allocationView) -> allocationView.allocation.transferLegSides == [])
+            allocationsWithViews)
+        assertMsg "allocation must use iterated funding"
+          (all
+            (\(_, allocationView) -> allocationView.allocation.nextIterationFunding /= None)
+            allocationsWithViews)
+        assertMsg "settlement must complete every allocation"
+          (all
+            (\(finalizedAllocation, _) -> finalizedAllocation.nextIterationFunding == None)
+            allocationsWithViews)
+        _ <- forA allocationsWithViews (validateFinalizedAllocation instrumentId)
+        assertMsg "allocation authorizer must match every transfer leg side"
+          (all
+            (\(finalizedAllocation, allocationView) ->
+              all
+                (allocationAuthorizesSide
+                  allocationView.allocation.authorizer
+                  arg.transferLegs)
+                (allocationView.allocation.transferLegSides
+                  <> finalizedAllocation.extraTransferLegSides))
+            allocationsWithViews)
+        assertMsg "settlement legs must match sender and receiver authorization"
+          (sort authorizedSides == sort expectedSides)
+
+        allocationResults <- forA arg.allocations $ \finalizedAllocation ->
+          exercise finalizedAllocation.allocationCid Allocation_Settle with
+            actors = arg.actors
+            extraTransferLegSides = finalizedAllocation.extraTransferLegSides
+            nextIterationFunding = finalizedAllocation.nextIterationFunding
+            extraArgs = arg.extraArgs
+        pure SettlementFactory_SettleBatchResult with
+          allocationSettleResults = allocationResults
+          meta = emptyMetadata
+
+      settlementFactory_publicFetchImpl _self _arg = pure SettlementFactoryView with
+        admin
+        meta = emptyMetadata

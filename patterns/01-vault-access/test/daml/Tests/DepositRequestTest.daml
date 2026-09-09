@@ -1,0 +1,151 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Tests.DepositRequestTest where
+
+import Daml.Script
+
+import Splice.Api.Token.AllocationV2 (Allocation)
+import Splice.Api.Token.HoldingV2 (Account(..), Holding, InstrumentId)
+
+import AccessAttestation qualified as Attestation
+import AttestationInfo
+import DepositInfo
+import DepositRequest
+import Tests.TokenFixtures
+import VaultAccess
+
+-- A minimal vault that only exposes the DepositInfo view the flow needs.
+template TestVault
+  with
+    vaultId : Text
+    manager : Party
+    acceptedInstrument : InstrumentId
+    treasury : Account
+    minDeposit : Decimal
+  where
+    signatory manager
+
+    interface instance DepositInfo for TestVault where
+      view = DepositView with vaultId, manager, acceptedInstrument, treasury, minDeposit
+
+testVaultId : Text
+testVaultId = "550e8400-e29b-41d4-a716-446655440000"
+
+depositAmount : Decimal
+depositAmount = 100.0
+
+data Context = Context with
+  registry : TestUsdcRegistry
+  manager : Party
+  depositor : Party
+  vaultCid : ContractId TestVault
+  vaultDisclosure : Disclosure
+  attestationCid : ContractId AttestationInfo
+  accessCid : ContractId VaultAccess
+  treasury : Account
+  holdingCid : ContractId TestHolding
+
+setup : () -> Script Context
+setup () = script do
+  manager <- allocateParty "manager"
+  depositor <- allocateParty "depositor"
+  registry <- allocateTestUsdcRegistry depositor manager
+  let treasury = Account with owner = Some manager, provider = None, id = "vault:" <> testVaultId
+  vaultCid <- submit manager $ createCmd TestVault with
+    vaultId = testVaultId
+    manager
+    acceptedInstrument = registry.instrumentId
+    treasury
+    minDeposit = 10.0
+  Some vaultDisclosure <- queryDisclosure manager vaultCid
+  attestationTemplateCid <- submit manager $ createCmd Attestation.AccessAttestation with
+    manager; depositor; vaultIds = [testVaultId]; evidenceHash = Some "sha256:test-kyb-evidence"
+  let attestationCid = toInterfaceContractId @AttestationInfo attestationTemplateCid
+  accessCid <- submit manager $ createCmd VaultAccess with
+    vaultId = testVaultId
+    manager
+    depositor
+    attestationCid
+  holdingCid <- issueHolding registry depositor registry.instrumentId depositAmount
+  pure Context with
+    registry
+    manager
+    depositor
+    vaultCid
+    vaultDisclosure
+    attestationCid
+    accessCid
+    treasury
+    holdingCid
+
+requestDeposit : Context -> Script (ContractId DepositRequest)
+requestDeposit Context{..} =
+  submit (actAs depositor <> disclose vaultDisclosure) $ exerciseCmd accessCid Deposit with
+    vaultCid = toInterfaceContractId @DepositInfo vaultCid
+    inputHoldingCids = [toInterfaceContractId @Holding holdingCid]
+    amount = depositAmount
+    allocationFactoryCid = testAllocationFactoryCid registry
+    extraArgs = emptyExtraArgs
+
+holdingsFor : Party -> Account -> Script [(ContractId Holding, Decimal)]
+holdingsFor reader account = do
+  holdings <- queryInterface @Holding reader
+  pure [(cid, holding.amount) | (cid, Some holding) <- holdings, holding.account == account, holding.lock == None]
+
+-- Opening a deposit creates the request and its bound allocation.
+testCreateDepositRequest : Script ()
+testCreateDepositRequest = script do
+  context@Context{..} <- setup ()
+  requestCid <- requestDeposit context
+
+  Some request <- queryContractId depositor requestCid
+  assertMsg "request belongs to the expected vault" (request.vaultId == testVaultId)
+  assertMsg "request preserves the deposit terms"
+    (request.instrumentId == registry.instrumentId && request.amount == depositAmount)
+  assertMsg "request preserves the attestation reference"
+    (request.attestationCid == attestationCid)
+
+  Some allocation <- queryInterfaceContractId @Allocation manager request.allocationCid
+  assertMsg "request and allocation share the settlement identity"
+    (allocation.settlement == request.settlement)
+
+-- Accepting the request settles the deposit and mints matching shares.
+testAcceptDeposit : Script ()
+testAcceptDeposit = script do
+  context@Context{..} <- setup ()
+  requestCid <- requestDeposit context
+  Some request <- queryContractId depositor requestCid
+
+  settlement <- submit manager $ exerciseCmd requestCid AcceptDeposit with
+    settlementFactoryCid = testSettlementFactoryCid registry
+    extraArgs = emptyExtraArgs
+
+  assertMsg "shares are minted one to one" (settlement.mintedShares == depositAmount)
+  None <- queryContractId depositor requestCid
+  None <- queryInterfaceContractId @Allocation manager request.allocationCid
+  Some share <- queryContractId depositor settlement.shareCid
+  assertMsg "share belongs to the depositor"
+    (share.depositor == depositor && share.shares == depositAmount)
+  [(_, treasuryAmount)] <- holdingsFor manager treasury
+  assertMsg "treasury received the deposit" (treasuryAmount == depositAmount)
+
+testRevokedAttestationBlocksAccept : Script ()
+testRevokedAttestationBlocksAccept = script do
+  context@Context{..} <- setup ()
+  requestCid <- requestDeposit context
+  Some request <- queryContractId depositor requestCid
+
+  submit manager $ exerciseCmd (fromInterfaceContractId @Attestation.AccessAttestation attestationCid) Attestation.Revoke
+  submitMustFail manager $ exerciseCmd requestCid AcceptDeposit with
+    settlementFactoryCid = testSettlementFactoryCid registry
+    extraArgs = emptyExtraArgs
+
+  -- Revocation blocks settlement while preserving the depositor's ability to recover funds.
+  Some _ <- queryContractId depositor requestCid
+  _ <- submit depositor $ exerciseCmd requestCid CancelDeposit with
+    extraArgs = emptyExtraArgs
+  None <- queryContractId depositor requestCid
+  None <- queryInterfaceContractId @Allocation manager request.allocationCid
+  [(_, returnedAmount)] <- holdingsFor depositor (basicAccount depositor)
+  assertMsg "cancellation returns the full deposit" (returnedAmount == depositAmount)

@@ -1,0 +1,118 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module VaultAccess where
+
+import DA.List (dedup)
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.AllocationInstructionV2
+import Splice.Api.Token.AllocationV2
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.MetadataV1
+
+import AttestationInfo
+import DepositRequest
+import DepositInfo
+
+template VaultAccess
+  with
+    vaultId : Text
+    manager : Party
+    depositor : Party
+    attestationCid : ContractId AttestationInfo
+  where
+    signatory manager
+    observer depositor
+    ensure vaultId /= ""
+
+    -- Deposits require both the per-vault access and general KYB approval to remain active.
+    nonconsuming choice Deposit : ContractId DepositRequest
+      with
+        vaultCid : ContractId DepositInfo
+        inputHoldingCids : [ContractId Holding]
+        amount : Decimal
+        allocationFactoryCid : ContractId AllocationFactory
+        extraArgs : ExtraArgs
+      controller depositor
+      do
+        attestation <- view <$> fetch attestationCid
+        assertMsg "attestation is from another manager" (attestation.manager == manager)
+        assertMsg "attestation is for another depositor" (attestation.depositor == depositor)
+        assertMsg "attestation does not cover this vault" (vaultId `elem` attestation.vaultIds)
+
+        vault <- view <$> fetch vaultCid
+        assertMsg "vault ID does not match access" (vault.vaultId == vaultId)
+        assertMsg "vault manager does not match access" (vault.manager == manager)
+
+        inputHoldings <- forA inputHoldingCids fetch
+        let holdingViews = map view inputHoldings
+        firstHoldingView <- case holdingViews of
+          [] -> fail "deposit requires at least one holding"
+          first :: _ -> pure first
+
+        assertMsg "deposit holdings must be unique"
+          (length inputHoldingCids == length (dedup inputHoldingCids))
+        assertMsg "deposit holdings must belong to the depositor"
+          (all (\holdingView -> holdingView.account.owner == Some depositor) holdingViews)
+        assertMsg "deposit holdings must use the same account"
+          (all (\holdingView -> holdingView.account == firstHoldingView.account) holdingViews)
+        assertMsg "deposit holdings are already locked"
+          (all (\holdingView -> holdingView.lock == None) holdingViews)
+        assertMsg "deposit holdings do not match vault instrument"
+          (all (\holdingView -> holdingView.instrumentId == vault.acceptedInstrument) holdingViews)
+        assertMsg "deposit holding amounts must be positive"
+          (all (\holdingView -> holdingView.amount > 0.0) holdingViews)
+        assertMsg "deposit amount must be positive" (amount > 0.0)
+        assertMsg "deposit amount is below vault minimum" (amount >= vault.minDeposit)
+        assertMsg "deposit holdings do not cover deposit amount"
+          (foldl (\total holdingView -> total + holdingView.amount) 0.0 holdingViews >= amount)
+
+        allocationFactoryView <- exercise allocationFactoryCid AllocationFactory_PublicFetch with
+          actors = [depositor]
+        assertMsg "allocation factory does not match vault instrument admin"
+          (allocationFactoryView.admin == vault.acceptedInstrument.admin)
+
+        let settlement = SettlementInfo with
+              executors = [manager]
+              id = depositSettlementId
+              cid = Some (coerceContractId self)
+              meta = emptyMetadata
+        now <- getTime
+        allocationResult <- exercise allocationFactoryCid AllocationFactory_Allocate with
+          settlement
+          allocation = AllocationSpecification with
+            admin = vault.acceptedInstrument.admin
+            authorizer = firstHoldingView.account
+            transferLegSides = []
+            settlementDeadline = None
+            nextIterationFunding = Some (TextMap.fromList [(vault.acceptedInstrument.id, amount)])
+            committed = False
+            meta = emptyMetadata
+          requestedAt = now
+          inputHoldingCids
+          extraArgs
+          actors = [depositor]
+        allocationCid <- requireCompletedAllocation allocationResult
+
+        create DepositRequest with
+          vaultId
+          manager
+          depositor
+          vaultCid
+          instrumentId = vault.acceptedInstrument
+          amount
+          settlement
+          allocationCid
+          attestationCid
+
+    choice Revoke : ()
+      controller manager
+      do return ()
+
+requireCompletedAllocation : AllocationInstructionResult -> Update (ContractId Allocation)
+requireCompletedAllocation allocationResult =
+  case allocationResult.output of
+    AllocationInstructionResult_Completed cid -> pure cid
+    AllocationInstructionResult_Pending _ -> fail "deposit allocation is pending registry processing"
+    AllocationInstructionResult_Failed -> fail "deposit allocation failed"

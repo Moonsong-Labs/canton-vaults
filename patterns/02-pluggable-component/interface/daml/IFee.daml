@@ -1,0 +1,25 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module IFee where
+
+data FeeView = FeeView with
+  manager : Party
+  label : Text
+    deriving (Eq, Show)
+
+interface IFee where
+  viewtype FeeView
+
+  calculateFee : Decimal -> Decimal
+
+  nonconsuming choice CalculateFee : Decimal
+    with
+      requester : Party
+      amount : Decimal
+    controller requester
+    do
+      assertMsg "amount must be positive" (amount > 0.0)
+      let fee = calculateFee this amount
+      assertMsg "fee must be between zero and the amount" (fee >= 0.0 && fee <= amount)
+      pure fee

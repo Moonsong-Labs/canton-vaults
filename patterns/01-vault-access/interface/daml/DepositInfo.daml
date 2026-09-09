@@ -1,0 +1,17 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module DepositInfo where
+
+import Splice.Api.Token.HoldingV2 (Account, InstrumentId)
+
+data DepositView = DepositView with
+  vaultId : Text
+  manager : Party
+  acceptedInstrument : InstrumentId
+  treasury : Account
+  minDeposit : Decimal
+    deriving (Eq, Show)
+
+interface DepositInfo where
+  viewtype DepositView

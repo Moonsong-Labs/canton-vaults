@@ -1,0 +1,15 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module AttestationInfo where
+
+data AttestationView = AttestationView with
+  manager : Party
+  depositor : Party
+  vaultIds : [Text]
+    deriving (Eq, Show)
+
+-- What a reader needs from a KYB attestation: who approved whom, and for
+-- which vaults. Readers depend on this view, never on the template.
+interface AttestationInfo where
+  viewtype AttestationView
