@@ -26,13 +26,15 @@ template VaultAccess
     attestationCid : ContractId IAccessAttestation
     acceptedInstrument : InstrumentId
     treasury : Account
+    feeTreasury : Account
   where
     signatory manager
     observer depositor
     ensure vaultId /= "" && acceptedInstrument.id /= "" && treasury.owner == Some manager
+      && feeTreasury.owner == Some manager && feeTreasury /= treasury
 
     interface instance IVaultAccess for VaultAccess where
-      view = VaultAccessInfo with vaultId, manager, depositor, attestationCid, acceptedInstrument, treasury
+      view = VaultAccessInfo with vaultId, manager, depositor, attestationCid, acceptedInstrument, treasury, feeTreasury
 
     nonconsuming choice Deposit : ContractId DepositRequest
       with

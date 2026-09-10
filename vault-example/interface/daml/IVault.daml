@@ -13,6 +13,7 @@ data VaultInfo = VaultInfo with
   name : Text
   acceptedInstrument : InstrumentId
   treasury : Account
+  feeTreasury : Account
     deriving (Eq, Show)
 
 interface IVault where

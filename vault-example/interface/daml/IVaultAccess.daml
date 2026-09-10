@@ -13,6 +13,7 @@ data VaultAccessInfo = VaultAccessInfo with
   attestationCid : ContractId IAccessAttestation
   acceptedInstrument : InstrumentId
   treasury : Account
+  feeTreasury : Account
     deriving (Eq, Show)
 
 interface IVaultAccess where
