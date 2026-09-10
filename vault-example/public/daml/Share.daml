@@ -1,0 +1,34 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Share where
+
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
+
+shareInstrumentId : Party -> Text -> InstrumentId
+shareInstrumentId manager vaultId = InstrumentId with
+  admin = manager
+  id = "vault-share:" <> vaultId
+
+shareAccount : Party -> Account
+shareAccount owner = Account with owner = Some owner; provider = None; id = ""
+
+-- Issuance requires the manager and the depositor's signed request.
+template Share
+  with
+    vaultId : Text
+    manager : Party
+    depositor : Party
+    shares : Decimal
+  where
+    signatory manager, depositor
+    ensure vaultId /= "" && shares > 0.0
+
+    interface instance Holding for Share where
+      view = HoldingView with
+        account = shareAccount depositor
+        instrumentId = shareInstrumentId manager vaultId
+        amount = shares
+        lock = None
+        meta = emptyMetadata
