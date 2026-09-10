@@ -1,0 +1,16 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module IVaultAccess where
+
+import IAccessAttestation (IAccessAttestation)
+
+data VaultAccessInfo = VaultAccessInfo with
+  vaultId : Text
+  manager : Party
+  depositor : Party
+  attestationCid : ContractId IAccessAttestation
+    deriving (Eq, Show)
+
+interface IVaultAccess where
+  viewtype VaultAccessInfo

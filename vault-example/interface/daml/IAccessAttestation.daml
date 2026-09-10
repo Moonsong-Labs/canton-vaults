@@ -1,0 +1,14 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module IAccessAttestation where
+
+data AccessAttestationInfo = AccessAttestationInfo with
+  manager : Party
+  depositor : Party
+  vaultIds : [Text]
+    deriving (Eq, Show)
+
+-- Consumers depend on the approval's scope independently of its implementation.
+interface IAccessAttestation where
+  viewtype AccessAttestationInfo

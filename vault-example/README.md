@@ -42,6 +42,28 @@ vault-example/
 The example owns its contracts and interfaces and has no dependencies on the
 patterns' packages. Daml Script is confined to the test package.
 
+Interfaces, their modules, and files use the `I` prefix (for example,
+`IAccessAttestation.daml`). Their view records use the `Info` suffix.
+
+## Admin-led access
+
+The `manager` administers access by creating two contracts directly:
+
+- `AccessAttestation` records the depositor's onboarding approval and the
+  `vaultIds` it covers. An optional `evidenceHash` references off-ledger evidence.
+- `VaultAccess` grants access to one vault and references the approval through
+  `ContractId IAccessAttestation`.
+
+Both contracts are signed by the manager and observed by the depositor. Each
+has a manager-controlled `Revoke` choice that archives that contract. Issuing
+access requires the manager's authorization; the depositor has no access-request
+choice.
+
+`IAccessAttestation` and `IVaultAccess` expose their views from the interface
+package. Operations using a permission must fetch both active contracts and
+check the manager, depositor, and vault scope. Storing the attestation's contract
+ID alone does not validate it when `VaultAccess` is created.
+
 ## Build and test
 
 From the repository root:

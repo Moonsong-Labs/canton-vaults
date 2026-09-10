@@ -1,0 +1,26 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module VaultAccess where
+
+import IAccessAttestation (IAccessAttestation)
+import IVaultAccess
+
+-- Consumers must fetch the attestation and validate its parties and vault scope.
+template VaultAccess
+  with
+    vaultId : Text
+    manager : Party
+    depositor : Party
+    attestationCid : ContractId IAccessAttestation
+  where
+    signatory manager
+    observer depositor
+    ensure vaultId /= ""
+
+    interface instance IVaultAccess for VaultAccess where
+      view = VaultAccessInfo with vaultId, manager, depositor, attestationCid
+
+    choice Revoke : ()
+      controller manager
+      do return ()
