@@ -28,3 +28,11 @@ template AccessAttestation
     choice Revoke : ()
       controller manager
       do return ()
+
+-- Recheck approval at request creation and consumption so revocation affects pending deposits.
+validateAttestation : ContractId IAccessAttestation -> Party -> Party -> Text -> Update ()
+validateAttestation attestationCid manager depositor vaultId = do
+  approval <- view <$> fetch attestationCid
+  assertMsg "attestation manager does not match vault" (approval.manager == manager)
+  assertMsg "attestation depositor does not match request" (approval.depositor == depositor)
+  assertMsg "vault is outside attestation scope" (vaultId `elem` approval.vaultIds)
