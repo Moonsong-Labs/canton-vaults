@@ -9,3 +9,7 @@ packages:
   - ./patterns/03-public-private-split/public
   - ./patterns/03-public-private-split/private
   - ./patterns/03-public-private-split/test
+  - ./vault-example/interface
+  - ./vault-example/public
+  - ./vault-example/private
+  - ./vault-example/test

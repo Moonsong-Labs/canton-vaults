@@ -1,0 +1,11 @@
+sdk-version: 3.5.2
+name: vault-example-public
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+build-options:
+  - --target=2.3
+data-dependencies:
+  - ../interface/.daml/dist/vault-example-interface-0.1.0.dar

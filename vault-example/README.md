@@ -1,0 +1,68 @@
+# Vault Example
+
+A self-contained vault implementation based on VaultKit, demonstrating
+access control, NAV-based share pricing, and deposit and redeem workflows
+on Canton.
+
+The example separates the contracts shared with depositors from the manager's
+private processing logic through an interface package. A two-participant sandbox
+shows how both parties interact while using different sets of DAR files.
+
+## Layout
+
+```text
+vault-example/
+├── multi-package.yaml
+├── interface/
+│   ├── daml.yaml
+│   └── daml/
+├── public/
+│   ├── daml.yaml
+│   └── daml/
+├── private/
+│   ├── daml.yaml
+│   └── daml/
+├── test/
+│   ├── daml.yaml
+│   ├── Deposit/
+│   ├── Redeem/
+│   └── Integration/
+└── sandbox/
+```
+
+- `interface/`: interfaces and shared types used across the package boundary.
+- `public/`: contracts that counterparties interact with. Depends on `interface/`.
+- `private/`: manager-side implementations. Depends on `interface/` and `public/`.
+- `test/`: one Daml Script package, grouped by feature. Its source root is `.`.
+  It depends on all three implementation packages.
+  Folder names match Daml module names, for example `Deposit/HappyPath.daml`
+  declares `module Deposit.HappyPath where`.
+- `sandbox/`: the two-participant environment for the depositor and manager.
+
+The example owns its contracts and interfaces and has no dependencies on the
+patterns' packages. Daml Script is confined to the test package.
+
+## Build and test
+
+From the repository root:
+
+```sh
+make build-vault-example
+make test-vault-example
+```
+
+`make build` and `make test` include the example alongside the patterns.
+The example can also be built independently with `dpm build --all` from this
+directory.
+
+## Participants and packages
+
+| Participant | Packages |
+| --- | --- |
+| Depositor | `interface`, `public` |
+| Manager | `interface`, `public`, `private` |
+
+The depositor submits requests through the public contracts. The manager
+processes those requests using the private implementations, and the depositor
+receives the public results. The interface package defines the shared boundary
+between these layers.
