@@ -1,0 +1,41 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Vault where
+
+import IAccessAttestation
+import IVault
+import VaultAccess (VaultAccess(..))
+
+template Vault
+  with
+    vaultId : Text
+    manager : Party
+    name : Text
+  where
+    signatory manager
+    ensure vaultId /= "" && name /= ""
+
+    -- The manager must keep one active vault per key; Canton permits duplicates.
+    key (manager, vaultId) : VaultKey
+    maintainer key._1
+
+    interface instance IVault for Vault where
+      view = VaultInfo with vaultId, manager, name
+
+    -- Consumers must recheck the approval so revocation takes effect after issuance.
+    nonconsuming choice GrantAccess : ContractId VaultAccess
+      with
+        depositor : Party
+        attestationCid : ContractId IAccessAttestation
+      controller manager
+      do
+        attestation <- view <$> fetch attestationCid
+        assertMsg "attestation manager does not match vault manager"
+          (attestation.manager == manager)
+        assertMsg "attestation depositor does not match access recipient"
+          (attestation.depositor == depositor)
+        assertMsg "vault is outside attestation scope"
+          (vaultId `elem` attestation.vaultIds)
+
+        create VaultAccess with vaultId, manager, depositor, attestationCid

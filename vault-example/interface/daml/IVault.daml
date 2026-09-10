@@ -1,0 +1,15 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module IVault where
+
+type VaultKey = (Party, Text)
+
+data VaultInfo = VaultInfo with
+  vaultId : Text
+  manager : Party
+  name : Text
+    deriving (Eq, Show)
+
+interface IVault where
+  viewtype VaultInfo

@@ -1,0 +1,51 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Onboarding.Access where
+
+import Daml.Script
+
+import AccessAttestation (AccessAttestation(..))
+import IAccessAttestation
+import IVault
+import IVaultAccess
+import Vault
+
+adminLedOnboarding : Script ()
+adminLedOnboarding = script do
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+  let vaultId = "treasury-vault"
+
+  createdVaultCid <- submit manager do
+    createCmd Vault with vaultId, manager, name = "Treasury Vault"
+
+  -- Resolve the stable identity before reading through the public interface.
+  Some (vaultCid, _) <- queryByKey @Vault manager (manager, vaultId)
+  assertMsg "key resolves the created vault" (vaultCid == createdVaultCid)
+  Some vaultInfo <- queryInterfaceContractId manager
+    (toInterfaceContractId @IVault vaultCid)
+  assertMsg "vault interface exposes its identity and name"
+    (vaultInfo == VaultInfo with vaultId, manager, name = "Treasury Vault")
+
+  -- Onboarding is performed off-ledger; this contract records its approval.
+  approvalCid <- submit manager do
+    createCmd AccessAttestation with
+      manager
+      depositor
+      vaultIds = [vaultId]
+      evidenceHash = None
+  let attestationCid = toInterfaceContractId @IAccessAttestation approvalCid
+
+  accessCid <- submit manager do
+    exerciseCmd vaultCid GrantAccess with depositor, attestationCid
+
+  Some accessInfo <- queryInterfaceContractId depositor
+    (toInterfaceContractId @IVaultAccess accessCid)
+  assertMsg "depositor sees access linked to the vault and approval"
+    (accessInfo == VaultAccessInfo with vaultId, manager, depositor, attestationCid)
+  Some approvalInfo <- queryInterfaceContractId depositor attestationCid
+  assertMsg "onboarding approval remains active"
+    (approvalInfo == AccessAttestationInfo with manager, depositor, vaultIds = [vaultId])
+  Some _ <- queryContractId manager vaultCid
+  pure ()
