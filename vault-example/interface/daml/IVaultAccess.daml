@@ -4,12 +4,15 @@
 module IVaultAccess where
 
 import IAccessAttestation (IAccessAttestation)
+import Splice.Api.Token.HoldingV2 (Account, InstrumentId)
 
 data VaultAccessInfo = VaultAccessInfo with
   vaultId : Text
   manager : Party
   depositor : Party
   attestationCid : ContractId IAccessAttestation
+  acceptedInstrument : InstrumentId
+  treasury : Account
     deriving (Eq, Show)
 
 interface IVaultAccess where

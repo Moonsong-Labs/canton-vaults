@@ -3,6 +3,7 @@
 
 module VaultAccess where
 
+import Splice.Api.Token.HoldingV2
 import IAccessAttestation (IAccessAttestation)
 import IVaultAccess
 
@@ -13,13 +14,15 @@ template VaultAccess
     manager : Party
     depositor : Party
     attestationCid : ContractId IAccessAttestation
+    acceptedInstrument : InstrumentId
+    treasury : Account
   where
     signatory manager
     observer depositor
-    ensure vaultId /= ""
+    ensure vaultId /= "" && acceptedInstrument.id /= "" && treasury.owner == Some manager
 
     interface instance IVaultAccess for VaultAccess where
-      view = VaultAccessInfo with vaultId, manager, depositor, attestationCid
+      view = VaultAccessInfo with vaultId, manager, depositor, attestationCid, acceptedInstrument, treasury
 
     choice Revoke : ()
       controller manager

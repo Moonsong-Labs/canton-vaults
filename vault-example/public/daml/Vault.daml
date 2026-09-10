@@ -6,22 +6,26 @@ module Vault where
 import IAccessAttestation
 import IVault
 import VaultAccess (VaultAccess(..))
+import Splice.Api.Token.HoldingV2 (Account(..), InstrumentId(..))
 
 template Vault
   with
     vaultId : Text
     manager : Party
     name : Text
+    acceptedInstrument : InstrumentId
+    treasury : Account
   where
     signatory manager
-    ensure vaultId /= "" && name /= ""
+    ensure vaultId /= "" && name /= "" && acceptedInstrument.id /= ""
+      && treasury.owner == Some manager
 
     -- The manager must keep one active vault per key; Canton permits duplicates.
     key (manager, vaultId) : VaultKey
     maintainer key._1
 
     interface instance IVault for Vault where
-      view = VaultInfo with vaultId, manager, name
+      view = VaultInfo with vaultId, manager, name, acceptedInstrument, treasury
 
     -- Consumers must recheck the approval so revocation takes effect after issuance.
     nonconsuming choice GrantAccess : ContractId VaultAccess
@@ -38,4 +42,4 @@ template Vault
         assertMsg "vault is outside attestation scope"
           (vaultId `elem` attestation.vaultIds)
 
-        create VaultAccess with vaultId, manager, depositor, attestationCid
+        create VaultAccess with vaultId, manager, depositor, attestationCid, acceptedInstrument, treasury

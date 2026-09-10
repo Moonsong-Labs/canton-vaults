@@ -4,6 +4,7 @@
 module Onboarding.Access where
 
 import Daml.Script
+import Splice.Api.Token.HoldingV2 (Account(..), InstrumentId(..))
 
 import AccessAttestation (AccessAttestation(..))
 import IAccessAttestation
@@ -16,9 +17,11 @@ adminLedOnboarding = script do
   manager <- allocateParty "Manager"
   depositor <- allocateParty "Depositor"
   let vaultId = "treasury-vault"
+      acceptedInstrument = InstrumentId with admin = manager; id = "USDCx"
+      treasury = Account with owner = Some manager; provider = None; id = vaultId
 
   createdVaultCid <- submit manager do
-    createCmd Vault with vaultId, manager, name = "Treasury Vault"
+    createCmd Vault with vaultId, manager, acceptedInstrument, treasury; name = "Treasury Vault"
 
   -- Resolve the stable identity before reading through the public interface.
   Some (vaultCid, _) <- queryByKey @Vault manager (manager, vaultId)
@@ -26,7 +29,7 @@ adminLedOnboarding = script do
   Some vaultInfo <- queryInterfaceContractId manager
     (toInterfaceContractId @IVault vaultCid)
   assertMsg "vault interface exposes its identity and name"
-    (vaultInfo == VaultInfo with vaultId, manager, name = "Treasury Vault")
+    (vaultInfo == VaultInfo with vaultId, manager, acceptedInstrument, treasury; name = "Treasury Vault")
 
   -- Onboarding is performed off-ledger; this contract records its approval.
   approvalCid <- submit manager do
@@ -43,7 +46,7 @@ adminLedOnboarding = script do
   Some accessInfo <- queryInterfaceContractId depositor
     (toInterfaceContractId @IVaultAccess accessCid)
   assertMsg "depositor sees access linked to the vault and approval"
-    (accessInfo == VaultAccessInfo with vaultId, manager, depositor, attestationCid)
+    (accessInfo == VaultAccessInfo with vaultId, manager, depositor, attestationCid, acceptedInstrument, treasury)
   Some approvalInfo <- queryInterfaceContractId depositor attestationCid
   assertMsg "onboarding approval remains active"
     (approvalInfo == AccessAttestationInfo with manager, depositor, vaultIds = [vaultId])

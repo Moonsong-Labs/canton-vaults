@@ -8,4 +8,5 @@ dependencies:
 build-options:
   - --target=2.3
 data-dependencies:
+  - ../../dependencies/token-standard/splice-api-token-holding-v2-1.0.0.dar
   - ../interface/.daml/dist/vault-example-interface-0.1.0.dar

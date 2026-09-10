@@ -3,12 +3,16 @@
 
 module IVault where
 
+import Splice.Api.Token.HoldingV2 (Account, InstrumentId)
+
 type VaultKey = (Party, Text)
 
 data VaultInfo = VaultInfo with
   vaultId : Text
   manager : Party
   name : Text
+  acceptedInstrument : InstrumentId
+  treasury : Account
     deriving (Eq, Show)
 
 interface IVault where
