@@ -1,3 +1,4 @@
 **/.daml/
 log/
 .DS_Store
+/.vscode/
