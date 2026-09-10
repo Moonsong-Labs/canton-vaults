@@ -4,6 +4,7 @@
 module DepositHandler where
 
 import IDepositHandler
+import IFee
 import INAV
 import NAV
 import Vault (Vault(..))
@@ -12,6 +13,7 @@ template DepositHandler
   with
     vaultId : Text
     manager : Party
+    feeCid : ContractId IFee
   where
     signatory manager
     ensure vaultId /= ""
@@ -27,12 +29,16 @@ template DepositHandler
         (navCid, nav) <- fetchByKey @NAV (manager, vaultId)
         assertMsg "deposit instrument does not match vault"
           (vault.acceptedInstrument == instrumentId)
-        let sharePrice = (view (toInterface @INAV nav)).sharePrice
-            shares = sharesForDeposit amount sharePrice
+        feeInfo <- view <$> fetch feeCid
+        assertMsg "fee model belongs to another manager" (feeInfo.manager == manager)
+        fee <- exercise feeCid CalculateFee with amount
+        let netAmount = amount - fee
+            sharePrice = (view (toInterface @INAV nav)).sharePrice
+            shares = sharesForDeposit netAmount sharePrice
         assertMsg "deposit must issue positive shares" (shares > 0.0)
 
         -- A later settlement failure rolls back this update in the same transaction.
         exercise navCid UpdateNAV with
-          newNav = nav.nav + amount
+          newNav = nav.nav + netAmount
           newTotalShares = nav.totalShares + shares
-        pure DepositQuote with sharePrice, shares
+        pure DepositQuote with fee, sharePrice, shares

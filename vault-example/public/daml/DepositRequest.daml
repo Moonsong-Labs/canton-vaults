@@ -17,6 +17,7 @@ import ShareRegistry
 
 data DepositSettlement = DepositSettlement with
   amount : Decimal
+  fee : Decimal
   sharePrice : Decimal
   mintedShares : Decimal
   shareCid : ContractId Share
@@ -55,8 +56,10 @@ template DepositRequest
         validateAttestation access.attestationCid manager depositor vaultId
         assertMsg "deposit quote must have a positive price and share amount"
           (quote.sharePrice > 0.0 && quote.shares > 0.0)
+        assertMsg "fee must leave a positive net deposit" (quote.fee >= 0.0 && quote.fee < amount)
+        let netAmount = amount - quote.fee
         assertMsg "quoted shares do not match deposit amount"
-          (quote.shares == sharesForDeposit amount quote.sharePrice)
+          (quote.shares == sharesForDeposit netAmount quote.sharePrice)
         registry <- fetch shareRegistryCid
         assertMsg "share registry belongs to another vault"
           (registry.manager == manager && registry.vaultId == vaultId)
@@ -70,15 +73,21 @@ template DepositRequest
               transferLegId = "vault-deposit"
               sender = allocation.allocation.authorizer
               receiver = access.treasury
-              amount
+              amount = netAmount
               instrumentId = instrumentId.id
               meta = emptyMetadata
+            feeLeg = leg with
+              transferLegId = "vault-deposit-fee"
+              receiver = access.feeTreasury
+              amount = quote.fee
+            -- Both legs spend the same prefunded amount; fees stay outside NAV.
+            legs = [leg] <> [feeLeg | quote.fee > 0.0]
         result <- exercise settlementFactoryCid SettlementFactory_SettleBatch with
           settlement
-          transferLegs = [leg]
+          transferLegs = legs
           allocations = [FinalizedAllocation with
             allocationCid
-            extraTransferLegSides = [senderSide leg]
+            extraTransferLegSides = map senderSide legs
             nextIterationFunding = None]
           actors = [manager]
           extraArgs
@@ -94,6 +103,7 @@ template DepositRequest
         exercise (toInterfaceContractId @EventLog shareRegistryCid) (shareMintEvent share shareCid)
         pure DepositSettlement with
           amount, shareCid
+          fee = quote.fee
           sharePrice = quote.sharePrice
           mintedShares = quote.shares
 
@@ -129,7 +139,7 @@ validateFunding DepositRequest{..} allocation = do
     (holding.account == allocation.allocation.authorizer && holding.instrumentId == instrumentId
       && holding.amount == amount && holding.lock /= None)
 
--- The sender side lets the prefunded allocation authorize delivery to the treasury.
+-- The sender side authorizes delivery from the allocation to each destination.
 senderSide : TransferLeg -> TransferLegSide
 senderSide TransferLeg{..} = TransferLegSide with
   transferLegId, amount, instrumentId, meta

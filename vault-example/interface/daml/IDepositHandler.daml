@@ -12,6 +12,7 @@ data DepositHandlerInfo = DepositHandlerInfo with
     deriving (Eq, Show)
 
 data DepositQuote = DepositQuote with
+  fee : Decimal
   sharePrice : Decimal
   shares : Decimal
     deriving (Eq, Show)
