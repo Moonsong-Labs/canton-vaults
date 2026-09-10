@@ -12,4 +12,4 @@ build-options:
 data-dependencies:
   - ../interface/.daml/dist/deposit-interface-0.1.0.dar
   - ../public/.daml/dist/deposit-public-0.1.0.dar
-  - ../private/.daml/dist/deposit-policy-0.1.0.dar
+  - ../private/.daml/dist/deposit-handler-0.1.0.dar

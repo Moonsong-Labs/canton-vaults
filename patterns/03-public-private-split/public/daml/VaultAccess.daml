@@ -1,0 +1,44 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module VaultAccess where
+
+import DepositRequest
+import IDepositHandler
+
+template VaultAccess
+  with
+    manager : Party
+    depositor : Party
+    vaultId : Text
+  where
+    signatory manager
+    observer depositor
+    ensure vaultId /= ""
+
+    nonconsuming choice Deposit : ContractId DepositRequest
+      with
+        amount : Decimal
+      controller depositor
+      do
+        create DepositRequest with manager; depositor; vaultId; amount
+
+    -- Contract observers do not witness this nonconsuming, manager-controlled
+    -- exercise. Private processing stays outside the public acceptance subtree.
+    nonconsuming choice HandleDeposit : Decimal
+      with
+        requestCid : ContractId DepositRequest
+        handlerCid : ContractId IDepositHandler
+      controller manager
+      do
+        request <- fetch requestCid
+        assertMsg "request does not match this access"
+          (request.manager == manager && request.depositor == depositor && request.vaultId == vaultId)
+        handler <- fetch handlerCid
+        assertMsg "handler belongs to another manager" ((view handler).manager == manager)
+        handleDeposit handler request.amount
+        exercise requestCid Consume
+
+    choice Revoke : ()
+      controller manager
+      do pure ()

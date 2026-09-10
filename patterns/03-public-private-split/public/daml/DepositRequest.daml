@@ -8,11 +8,19 @@ template DepositRequest
   with
     manager : Party
     depositor : Party
+    vaultId : Text
     amount : Decimal
   where
     signatory depositor
     observer manager
-    ensure amount > 0.0
+    ensure vaultId /= "" && amount > 0.0
+
+    -- The signed request supplies the depositor's authority for the receipt.
+    choice Consume : Decimal
+      controller manager
+      do
+        create DepositReceipt with manager; depositor; vaultId; amount
+        pure amount
 
     choice Cancel : ()
       controller depositor
@@ -22,16 +30,11 @@ template DepositRequest
       controller manager
       do pure ()
 
-    choice Settle : Decimal
-      controller manager
-      do
-        create DepositReceipt with manager; depositor; amount
-        pure amount
-
 template DepositReceipt
   with
     manager : Party
     depositor : Party
+    vaultId : Text
     amount : Decimal
   where
     signatory manager, depositor

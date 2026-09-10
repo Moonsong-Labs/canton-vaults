@@ -1,0 +1,13 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module IDepositHandler where
+
+data DepositHandlerInfo = DepositHandlerInfo with
+  manager : Party
+    deriving (Eq, Show)
+
+interface IDepositHandler where
+  viewtype DepositHandlerInfo
+
+  handleDeposit : Decimal -> Update ()

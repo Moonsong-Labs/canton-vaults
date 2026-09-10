@@ -5,53 +5,66 @@ module Tests.DepositTest where
 
 import Daml.Script
 import DepositRequest
-import DepositProcessor
-import DepositPolicy
-import IDepositPolicy
+import DepositHandler
+import IDepositHandler
+import VaultAccess
 
 testDeposit : Script ()
 testDeposit = script do
   manager <- allocateParty "manager"
   depositor <- allocateParty "depositor"
-  policyCid <- submit manager $ createCmd DepositPolicy with manager; maxDeposit = 2000.0
-  processorCid <- submit manager $ createCmd DepositProcessor with
-    manager; depositor
-    policyCid = toInterfaceContractId @IDepositPolicy policyCid
+  let vaultId = "vault-1"
 
-  -- The depositor sees the public processor while its policy stays manager-only.
-  Some _ <- queryContractId depositor processorCid
-  policy <- queryContractId depositor policyCid
-  assertMsg "policy is private to the manager" (policy == None)
+  -- The manager grants vault access and configures its private deposit limit.
+  accessCid <- submit manager $ createCmd VaultAccess with manager; depositor; vaultId
+  handlerCid <- submit manager $ createCmd DepositHandler with manager; maxDeposit = 2000.0
+  handler <- queryContractId depositor handlerCid
+  assertMsg "handler is private to the manager" (handler == None)
 
-  -- Each submission acts only as the party responsible for that step.
-  requestCid <- submit depositor $ createCmd DepositRequest with
-    manager; depositor; amount = 1500.0
-  result <- submit manager $ exerciseCmd processorCid Accept with
-    requestCid
+  -- The depositor uses the access contract to create a pending DepositRequest.
+  -- No funds move at this stage.
+  requestCid <- submit depositor $ exerciseCmd accessCid Deposit with amount = 1500.0
 
+  -- Processing belongs to the manager; the depositor can only propose the deposit.
+  submitMustFail depositor $ exerciseCmd accessCid HandleDeposit with
+    requestCid; handlerCid = toInterfaceContractId @IDepositHandler handlerCid
+
+  -- HandleDeposit invokes the interface method implemented by the private handler.
+  -- If the limit check passes, Accept consumes the request and creates the receipt
+  -- within the same transaction.
+  result <- submit manager $ exerciseCmd accessCid HandleDeposit with
+    requestCid; handlerCid = toInterfaceContractId @IDepositHandler handlerCid
+
+  -- The receipt is the public outcome shared by both parties. A full vault would
+  -- settle the assets and issue shares here; this pattern only records acceptance.
   assertMsg "accept returns the settled amount" (result == 1500.0)
   receipts <- query @DepositReceipt depositor
   assertMsg "depositor receives the public receipt"
-    (map snd receipts == [DepositReceipt with manager; depositor; amount = 1500.0])
+    (map snd receipts == [DepositReceipt with manager; depositor; vaultId; amount = 1500.0])
   managerReceipts <- query @DepositReceipt manager
   assertMsg "both parties see the same receipt" (managerReceipts == receipts)
+
+  -- The request is consumed; access and the private handler remain reusable.
   pending <- queryContractId depositor requestCid
   assertMsg "settlement consumes the request" (pending == None)
+  Some _ <- queryContractId manager handlerCid
+  Some _ <- queryContractId depositor accessCid
+  pure ()
 
-testPolicyLimit : Script ()
-testPolicyLimit = script do
+testDepositLimit : Script ()
+testDepositLimit = script do
   manager <- allocateParty "manager"
   depositor <- allocateParty "depositor"
-  policyCid <- submit manager $ createCmd DepositPolicy with manager; maxDeposit = 2000.0
-  processorCid <- submit manager $ createCmd DepositProcessor with
-    manager; depositor
-    policyCid = toInterfaceContractId @IDepositPolicy policyCid
-  requestCid <- submit depositor $ createCmd DepositRequest with
-    manager; depositor; amount = 2500.0
+  let vaultId = "vault-1"
+  accessCid <- submit manager $ createCmd VaultAccess with manager; depositor; vaultId
+  handlerCid <- submit manager $ createCmd DepositHandler with manager; maxDeposit = 2000.0
 
-  -- A failed policy check leaves the request available for cancellation.
-  submitMustFail manager $ exerciseCmd processorCid Accept with
-    requestCid
+  -- Request creation succeeds even above the limit, which is checked during processing.
+  requestCid <- submit depositor $ exerciseCmd accessCid Deposit with amount = 2500.0
+
+  -- A failed private check leaves the proposal available for cancellation.
+  submitMustFail manager $ exerciseCmd accessCid HandleDeposit with
+    requestCid; handlerCid = toInterfaceContractId @IDepositHandler handlerCid
   receipts <- query @DepositReceipt depositor
   assertMsg "failed acceptance creates no receipt" (null receipts)
   submit depositor $ exerciseCmd requestCid Cancel
