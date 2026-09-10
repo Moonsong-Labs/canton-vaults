@@ -1,0 +1,38 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module DepositHandler where
+
+import IDepositHandler
+import INAV
+import NAV
+import Vault (Vault(..))
+
+template DepositHandler
+  with
+    vaultId : Text
+    manager : Party
+  where
+    signatory manager
+    ensure vaultId /= ""
+
+    interface instance IDepositHandler for DepositHandler where
+      view = DepositHandlerInfo with vaultId, manager
+
+      -- VaultAccess invokes this under a manager-only exercise. Valuation and
+      -- supply updates remain private while the quote feeds public settlement.
+      handleDeposit instrumentId amount = do
+        assertMsg "deposit amount must be positive" (amount > 0.0)
+        (_, vault) <- fetchByKey @Vault (manager, vaultId)
+        (navCid, nav) <- fetchByKey @NAV (manager, vaultId)
+        assertMsg "deposit instrument does not match vault"
+          (vault.acceptedInstrument == instrumentId)
+        let sharePrice = (view (toInterface @INAV nav)).sharePrice
+            shares = sharesForDeposit amount sharePrice
+        assertMsg "deposit must issue positive shares" (shares > 0.0)
+
+        -- A later settlement failure rolls back this update in the same transaction.
+        exercise navCid UpdateNAV with
+          newNav = nav.nav + amount
+          newTotalShares = nav.totalShares + shares
+        pure DepositQuote with sharePrice, shares
