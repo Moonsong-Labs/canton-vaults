@@ -1,0 +1,16 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module INAV where
+
+data NAVInfo = NAVInfo with
+  vaultId : Text
+  manager : Party
+  nav : Decimal
+  totalShares : Decimal
+  sharePrice : Decimal
+  updatedAt : Time
+    deriving (Eq, Show)
+
+interface INAV where
+  viewtype NAVInfo

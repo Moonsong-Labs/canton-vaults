@@ -25,6 +25,7 @@ vault-example/
 ├── test/
 │   ├── daml.yaml
 │   ├── Onboarding/
+│   ├── Valuation/
 │   ├── Deposit/
 │   ├── Redeem/
 │   └── Integration/
@@ -80,6 +81,34 @@ contract visibility and authorization.
 
 `test/Onboarding/Access.daml` covers vault lookup by key, interface reads,
 onboarding approval, and the manager granting a permission visible to the depositor.
+
+## Valuation
+
+`private/daml/NAV.daml` holds a manager-reported valuation snapshot. The manager signs
+it and controls `UpdateNAV`; optional `auditors` observe the full contract.
+The depositor receives valuation results through the public workflows. An
+interface definition alone grants no visibility into the underlying contract.
+
+`INAV` exposes `vaultId`, `manager`, `nav`, `totalShares`, `sharePrice`, and
+`updatedAt`. The price is derived from `nav / totalShares`. An empty vault has
+zero NAV and zero shares, with an initial price of `1`. Funded vaults require
+a positive share price.
+
+`UpdateNAV` atomically archives the snapshot and creates its replacement under
+the same `(manager, vaultId)` key. The manager must maintain one active snapshot
+per key, since Canton permits duplicates. Manager-side pricing can resolve it
+with `fetchByKey @NAV (manager, vaultId)` and use its `INAV` view. The template
+type selects the lookup: `@Vault` and `@NAV` use the same key value to resolve
+their respective contracts.
+
+The update takes NAV and share supply as inputs and sets `updatedAt` from ledger
+time using `getTime`. This timestamp records when the snapshot was updated.
+Oracle integration must validate price freshness using the oracle's own timestamps.
+Oracle price aggregation and reconciliation with issued shares belong to the
+valuation and settlement workflows; this snapshot records the manager's figures.
+
+`test/Valuation/NAV.daml` checks the initial price, update by key, replacement
+lookup, derived price, and auditor/depositor visibility.
 
 ## Build and test
 
