@@ -64,7 +64,7 @@ template USDCxAllocation
     admin : Party
     settlement : SettlementInfo
     allocation : AllocationSpecification
-    lockedHoldingCid : ContractId USDCxHolding
+    lockedHoldingCid : Optional (ContractId USDCxHolding)
     createdAt : Time
   where
     signatory admin, accountOwner allocation.authorizer
@@ -75,11 +75,11 @@ template USDCxAllocation
         originalAllocationCid = None
         settlement
         allocation
-        holdingCids = [toInterfaceContractId @Holding lockedHoldingCid]
+        holdingCids = [toInterfaceContractId @Holding cid | Some cid <- [lockedHoldingCid]]
         createdAt
         numIterations = 0
         expiresAt = allocation.settlementDeadline
-        availableActions = Map.fromList [(AA_Settle, [settlement.executors])]
+        availableActions = Map.fromList [(AA_Settle, [dedup (admin :: settlement.executors)])]
         meta = emptyMetadata
 
       allocation_settleExtraObservers _arg = settlement.executors
@@ -88,39 +88,48 @@ template USDCxAllocation
 
       allocation_settleImpl self arg = do
         assertMsg "settlement actors must match the allocation executors"
-          (arg.actors == settlement.executors)
+          (sort arg.actors == sort (dedup (admin :: settlement.executors)))
         assertMsg "demo allocation requires deferred transfer legs"
           (allocation.transferLegSides == [])
         assertMsg "demo allocation requires iterated funding"
           (allocation.nextIterationFunding /= None)
         assertMsg "settlement must complete the allocation"
           (arg.nextIterationFunding == None)
+        now <- getTime
+        assertMsg "allocation settlement deadline has passed"
+          (optional True (now <=) allocation.settlementDeadline)
 
-        lockedHolding <- fetch lockedHoldingCid
         let transferLegSides = arg.extraTransferLegSides
-        assertMsg "settlement must include outgoing transfer legs" (not (null transferLegSides))
-        assertMsg "settlement amount must match the locked holding"
-          (totalAmount transferLegSides == lockedHolding.amount)
-
-        _ <- forA transferLegSides $ \side -> do
-          assertMsg "settlement legs must debit the allocating account"
-            (side.side == SenderSide && side.amount > 0.0)
-          assertMsg "settlement legs must use the allocated instrument"
-            (side.instrumentId == lockedHolding.instrumentId.id)
-
-        _ <- forA transferLegSides $ \side ->
-            create USDCxHolding with
+        assertMsg "settlement requires positive legs"
+          (not (null transferLegSides) && all (\side -> side.amount > 0.0) transferLegSides)
+        -- The registry authorizes balanced debits and credits. Each allocation
+        -- carries its own account owner's authority for the resulting holdings.
+        outputCids <- case lockedHoldingCid of
+          Some cid -> do
+            holding <- fetch cid
+            assertMsg "funded allocation must spend exactly its holding"
+              (all (\side -> side.side == SenderSide && side.instrumentId == holding.instrumentId.id) transferLegSides
+                && totalAmount transferLegSides == holding.amount)
+            archive cid
+            pure TextMap.empty
+          None -> do
+            first <- case transferLegSides of
+              side :: _ -> pure side
+              [] -> fail "receiving allocation requires transfer legs"
+            assertMsg "unfunded allocation only accepts one incoming instrument"
+              (all (\side -> side.side == ReceiverSide && side.instrumentId == first.instrumentId) transferLegSides)
+            cid <- create USDCxHolding with
               admin
-              account = side.otherside
-              instrumentId = lockedHolding.instrumentId
-              amount = side.amount
+              account = allocation.authorizer
+              instrumentId = InstrumentId with admin; id = first.instrumentId
+              amount = totalAmount transferLegSides
               lock = None
               observers = settlement.executors
-        archive lockedHoldingCid
+            pure (TextMap.fromList [(first.instrumentId, [toInterfaceContractId @Holding cid])])
         archive self
         pure AllocationResult with
           output = AllocationResult_Settled with nextIterationAllocationCid = None
-          authorizerHoldingCids = TextMap.empty
+          authorizerHoldingCids = outputCids
           meta = emptyMetadata
 
       allocation_cancelImpl _self _arg = fail "cancel is outside this demo asset's scope"
@@ -151,10 +160,26 @@ template USDCxRegistry
           (arg.allocation.transferLegSides == [])
 
         case arg.inputHoldingCids of
-          [] -> fail "demo asset requires funded holdings"
+          [] -> do
+            assertMsg "receiving allocation must have empty iterated funding"
+              (arg.allocation.nextIterationFunding == Some TextMap.empty)
+            cid <- create USDCxAllocation with
+              admin
+              settlement = arg.settlement
+              allocation = arg.allocation
+              lockedHoldingCid = None
+              createdAt = arg.requestedAt
+            pure AllocationInstructionResult with
+              output = AllocationInstructionResult_Completed (toInterfaceContractId @Allocation cid)
+              authorizerChangeCids = TextMap.empty
+              meta = emptyMetadata
           _ -> do
-            inputHoldings <- forA arg.inputHoldingCids fetch
-            let holdingViews = map view inputHoldings
+            -- Accept holdings issued by this demo implementation before reserving funds.
+            inputHoldings <- forA arg.inputHoldingCids $ \cid ->
+              fetch (coerceContractId cid : ContractId USDCxHolding)
+            assertMsg "input holdings must be unique"
+              (length arg.inputHoldingCids == length (dedup arg.inputHoldingCids))
+            let holdingViews = map (view . toInterface @Holding) inputHoldings
                 grossAmount = fundingFor instrumentId.id arg.allocation.nextIterationFunding
                 inputAmount = foldl (\total holdingView -> total + holdingView.amount) 0.0 holdingViews
             firstHoldingView <- case holdingViews of
@@ -197,7 +222,7 @@ template USDCxRegistry
               admin
               settlement = arg.settlement
               allocation = arg.allocation
-              lockedHoldingCid
+              lockedHoldingCid = Some lockedHoldingCid
               createdAt = arg.requestedAt
             pure AllocationInstructionResult with
               output = AllocationInstructionResult_Completed with
@@ -222,32 +247,63 @@ template USDCxRegistry
       settlementFactory_settleBatchImpl _self arg = do
         assertMsg "settlement actors must match the executors"
           (arg.actors == arg.settlement.executors)
-        finalized <- case arg.allocations of
-          [allocation] -> pure allocation
-          _ -> fail "demo asset requires one allocation"
-        allocation <- view <$> fetch finalized.allocationCid
-        assertMsg "allocation belongs to another settlement"
-          (allocation.settlement == arg.settlement && allocation.allocation.admin == admin)
-        assertMsg "settlement must finish the deferred allocation"
-          (null allocation.allocation.transferLegSides && finalized.nextIterationFunding == None)
         let legs = arg.transferLegs
             legIds = map (.transferLegId) legs
         assertMsg "settlement requires unique transfer legs"
           (not (null legs) && length legIds == length (dedup legIds))
-        assertMsg "transfer legs must spend the allocated asset"
-          (all (\leg -> leg.sender == allocation.allocation.authorizer
-            && leg.instrumentId == instrumentId.id && leg.amount > 0.0) legs)
-        assertMsg "allocation authorizes exactly the requested transfers"
-          (sort finalized.extraTransferLegSides == sort (map senderSide legs))
-        result <- exercise finalized.allocationCid Allocation_Settle with
-          actors = arg.actors
-          extraTransferLegSides = finalized.extraTransferLegSides
-          nextIterationFunding = None
-          extraArgs = arg.extraArgs
+        assertMsg "transfer legs must use this registry's instrument"
+          (all (\leg -> leg.instrumentId == instrumentId.id && leg.amount > 0.0) legs)
+        let cids = map (.allocationCid) arg.allocations
+        assertMsg "settlement allocations must be unique" (length cids == length (dedup cids))
+        supplied <- forA arg.allocations $ \finalized -> do
+          concrete <- fetch (coerceContractId finalized.allocationCid : ContractId USDCxAllocation)
+          let allocation = view (toInterface @Allocation concrete)
+          assertMsg "allocation belongs to another settlement"
+            (allocation.settlement == arg.settlement && allocation.allocation.admin == admin)
+          assertMsg "settlement must finish the deferred allocation"
+            (null allocation.allocation.transferLegSides && finalized.nextIterationFunding == None)
+          pure (allocation.allocation.authorizer, finalized)
+
+        -- Executor-owned receiving accounts can grant their approval here.
+        -- Other recipients supply an allocation carrying their own authority.
+        now <- getTime
+        let receivingAccounts = dedup (map (.receiver) legs)
+        added <- forA (filter (\account -> account `notElem` map fst supplied) receivingAccounts) $ \account -> do
+          assertMsg "recipient must supply an allocation or authorize settlement"
+            (accountOwner account `elem` arg.actors)
+          cid <- create USDCxAllocation with
+            admin
+            settlement = arg.settlement
+            allocation = AllocationSpecification with
+              admin; authorizer = account; transferLegSides = []; settlementDeadline = None
+              nextIterationFunding = Some TextMap.empty; committed = False; meta = emptyMetadata
+            lockedHoldingCid = None
+            createdAt = now
+          pure (account, FinalizedAllocation with
+            allocationCid = toInterfaceContractId @Allocation cid
+            extraTransferLegSides = [receiverSide leg | leg <- legs, leg.receiver == account]
+            nextIterationFunding = None)
+        let allAllocations = supplied <> added
+            authorized = [(account, side) | (account, finalized) <- allAllocations, side <- finalized.extraTransferLegSides]
+            expected = concat [[(leg.sender, senderSide leg), (leg.receiver, receiverSide leg)] | leg <- legs]
+        assertMsg "allocations must authorize both sides of every transfer exactly once"
+          (sort authorized == sort expected)
+        results <- forA allAllocations $ \(_, finalized) ->
+          exercise finalized.allocationCid Allocation_Settle with
+            actors = dedup (admin :: arg.actors)
+            extraTransferLegSides = finalized.extraTransferLegSides
+            nextIterationFunding = None
+            extraArgs = arg.extraArgs
         pure SettlementFactory_SettleBatchResult with
-          allocationSettleResults = [result]
+          allocationSettleResults = take (length supplied) results
           meta = emptyMetadata
 
       settlementFactory_publicFetchImpl _self _arg = pure SettlementFactoryView with
         admin
         meta = emptyMetadata
+
+receiverSide : TransferLeg -> TransferLegSide
+receiverSide TransferLeg{..} = TransferLegSide with
+  transferLegId, amount, instrumentId, meta
+  side = ReceiverSide
+  otherside = sender
