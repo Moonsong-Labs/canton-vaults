@@ -1,0 +1,190 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Integration.VaultFlow where
+
+import Daml.Script
+import DA.Time (addRelTime, hours)
+import Splice.Api.Token.HoldingV2
+import AccessAttestation qualified as Attestation
+import VaultAccess qualified as Access
+import Vault
+import NAV
+import FlatFee
+import IFee
+import IAccessAttestation
+import IDepositHandler
+import IRedeemHandler
+import ITradeHandler
+import ITradeOffer
+import DepositHandler
+import RedeemHandler
+import TradeHandler
+import TradeOffer qualified as Offer
+import Share
+import ShareRegistry
+import USDCx qualified as Cash
+import TokenizedAsset qualified as Asset
+import Fixtures.Assets
+
+vaultFlow : Script ()
+vaultFlow = script do
+  -- Onboarding & VaultAccess
+  -- Start with an empty vault and grant access after the depositor's onboarding.
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+  counterparty <- allocateParty "Counterparty"
+  cashIssuer <- allocateParty "USDCx issuer"
+  assetIssuer <- allocateParty "SOL issuer"
+  let vaultId = "investment-vault"
+      currency = InstrumentId with admin = cashIssuer; id = "USDCx"
+      sol = Asset.assetInstrumentId assetIssuer Asset.SOL
+      treasury = (basicAccount manager) with id = vaultId
+      feeTreasury = treasury with id = "fees"
+      counterpartyAccount = basicAccount counterparty
+  vaultCid <- submit manager $ createCmd Vault with
+    vaultId; manager; name = "Investment Vault"; acceptedInstrument = currency
+    treasury; feeTreasury
+  now <- getTime
+  _ <- submit manager $ createCmd NAV with
+    vaultId; manager; nav = 0.0; totalShares = 0.0; updatedAt = now; auditors = []
+  approvalCid <- submit manager $ createCmd Attestation.AccessAttestation with
+    manager; depositor; vaultIds = [vaultId]; evidenceHash = None
+  accessCid <- submit manager $ exerciseCmd vaultCid GrantAccess with
+    depositor; attestationCid = toInterfaceContractId @IAccessAttestation approvalCid
+  Some access <- queryContractId depositor accessCid
+  assertMsg "onboarding grants access to this vault"
+    (access.vaultId == vaultId && access.depositor == depositor)
+  assertValuation manager vaultId 0.0 0.0
+  -- ------------------------------------------------------------
+
+  -- Deposit & Shares
+  -- Deposit 1,001 USDCx: 1 goes to fees, 1,000 funds treasury and mints 1,000 shares.
+  cashRegistryCid <- submit cashIssuer $ createCmd Cash.USDCxRegistry with
+    admin = cashIssuer; instrumentId = currency; observers = [manager, depositor, counterparty]
+  let cashRegistry = USDCxFixture with
+        issuer = cashIssuer; instrumentId = currency; allocationFactoryCid = cashRegistryCid
+  depositHoldingCid <- issueHolding cashRegistry depositor 1001.0
+  shareRegistryCid <- submit manager $ createCmd ShareRegistry with vaultId; manager
+  feeCid <- submit manager $ createCmd FlatFee with manager
+  depositHandlerCid <- submit manager $ createCmd DepositHandler with
+    vaultId; manager; feeCid = toInterfaceContractId @IFee feeCid
+  depositRequestCid <- submit depositor $ exerciseCmd accessCid Access.Deposit with
+    inputHoldingCids = [toInterfaceContractId @Holding depositHoldingCid]
+    amount = 1001.0; allocationFactoryCid = testAllocationFactoryCid cashRegistry; extraArgs = emptyExtraArgs
+  deposit <- submit manager $ exerciseCmd accessCid Access.HandleDeposit with
+    requestCid = depositRequestCid; handlerCid = toInterfaceContractId @IDepositHandler depositHandlerCid
+    settlementFactoryCid = testSettlementFactoryCid cashRegistry; shareRegistryCid; extraArgs = emptyExtraArgs
+  Some shares <- queryInterfaceContractId depositor (toInterfaceContractId @Holding deposit.shareCid)
+  assertMsg "deposit mints 1,000 CIP-112 vault shares at price 1"
+    (shares.amount == 1000.0 && shares.instrumentId == shareInstrumentId manager vaultId
+      && shares.account == basicAccount depositor && shares.lock == None
+      && deposit.sharePrice == 1.0 && deposit.fee == 1.0)
+  None <- queryContractId depositor depositRequestCid
+  assertCashBalance manager treasury 1000.0
+  assertCashBalance manager feeTreasury 1.0
+  assertCashBalance depositor (basicAccount depositor) 0.0
+  assertValuation manager vaultId 1000.0 1000.0
+  -- ------------------------------------------------------------
+
+  -- Investment: Buy SOL
+  -- Spend 300 USDCx on 2 SOL at a fictional price of 150; retain 700 USDCx.
+  assetRegistryCid <- submit assetIssuer $ createCmd Asset.TokenizedAssetRegistry with
+    admin = assetIssuer; instrumentId = sol; observers = [manager, counterparty]
+  sellerHoldingCid <- submit (actAs [assetIssuer, counterparty]) $ createCmd Asset.TokenizedAssetHolding with
+    admin = assetIssuer; account = counterpartyAccount; instrumentId = sol
+    amount = 2.0; lock = None; observers = [manager]
+  investmentHandlerCid <- submit manager $ createCmd TradeHandler with
+    vaultId; manager; allowedAssets = [sol]; maxTradeAmount = 1000.0
+  let offer = Offer.TradeOffer with
+        vaultId; manager; counterparty; counterpartyAccount
+        terms = TradeTerms with direction = BuyAsset; asset = sol; currency; quantity = 2.0; unitPrice = 150.0
+        expiresAt = addRelTime now (hours 1)
+        counterpartyHoldingCids = [toInterfaceContractId @Holding sellerHoldingCid]
+        cashFactories = Offer.AssetFactories with
+          allocationFactoryCid = testAllocationFactoryCid cashRegistry
+          settlementFactoryCid = testSettlementFactoryCid cashRegistry
+        assetFactories = Offer.AssetFactories with
+          allocationFactoryCid = toInterfaceContractId assetRegistryCid
+          settlementFactoryCid = toInterfaceContractId assetRegistryCid
+  buyOfferCid <- submit counterparty $ createCmd offer
+  treasuryCash <- queryFilter @Cash.USDCxHolding manager (\h -> h.account == treasury)
+  _ <- submit manager $ exerciseCmd vaultCid Buy with
+    offerCid = toInterfaceContractId @ITradeOffer buyOfferCid
+    handlerCid = toInterfaceContractId @ITradeHandler investmentHandlerCid
+    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- treasuryCash]
+    extraArgs = emptyExtraArgs
+  [(solHoldingCid, solHolding)] <- queryFilter @Asset.TokenizedAssetHolding manager (\h -> h.account == treasury)
+  assertMsg "treasury owns 2 unlocked SOL" (solHolding.amount == 2.0 && solHolding.instrumentId == sol && solHolding.lock == None)
+  None <- queryContractId manager buyOfferCid
+  assertCashBalance manager treasury 700.0
+  assertCashBalance counterparty counterpartyAccount 300.0
+  assertValuation manager vaultId 1000.0 1000.0
+  -- ------------------------------------------------------------
+
+  -- Manual Valuation
+  -- Simulate SOL rising to 200 USDCx. The manager supplies NAV = 700 + 2 * 200.
+  -- This example deliberately uses a manual snapshot in place of an oracle.
+  Some (navCid, _) <- queryByKey @NAV manager (manager, vaultId)
+  _ <- submit manager $ exerciseCmd navCid UpdateNAV with
+    newNav = 700.0 + 2.0 * 200.0; newTotalShares = 1000.0
+  assertValuation manager vaultId 1100.0 1000.0
+  -- ------------------------------------------------------------
+
+  -- Investment: Sell SOL
+  -- Sell 1 SOL at 200, leaving 900 USDCx + 1 SOL. NAV remains 1,100.
+  counterpartyCash <- queryFilter @Cash.USDCxHolding counterparty (\h -> h.account == counterpartyAccount)
+  sellOfferCid <- submit counterparty $ createCmd offer with
+    terms = offer.terms with direction = SellAsset; quantity = 1.0; unitPrice = 200.0
+    counterpartyHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- counterpartyCash]
+  _ <- submit manager $ exerciseCmd vaultCid Sell with
+    offerCid = toInterfaceContractId @ITradeOffer sellOfferCid
+    handlerCid = toInterfaceContractId @ITradeHandler investmentHandlerCid
+    treasuryHoldingCids = [toInterfaceContractId @Holding solHoldingCid]; extraArgs = emptyExtraArgs
+  [(_, remainingSol)] <- queryFilter @Asset.TokenizedAssetHolding manager (\h -> h.account == treasury)
+  assertMsg "treasury retains 1 unlocked SOL" (remainingSol.amount == 1.0 && remainingSol.lock == None)
+  None <- queryContractId manager sellOfferCid
+  assertCashBalance manager treasury 900.0
+  assertCashBalance counterparty counterpartyAccount 100.0
+  assertValuation manager vaultId 1100.0 1000.0
+  -- ------------------------------------------------------------
+
+  -- Partial Redeem & Final Balances
+  -- Redeem 500 shares at 1.10: 549 USDCx to the depositor and 1 to fee treasury.
+  redeemHandlerCid <- submit manager $ createCmd RedeemHandler with
+    vaultId; manager; feeCid = toInterfaceContractId @IFee feeCid
+  Some shareRegistryDisclosure <- queryDisclosure manager shareRegistryCid
+  redeemRequest <- submit (actAs depositor <> disclose shareRegistryDisclosure) $ exerciseCmd deposit.shareCid Redeem with
+    sharesToRedeem = 500.0; shareRegistryCid = toInterfaceContractId shareRegistryCid
+  treasuryCashForRedeem <- queryFilter @Cash.USDCxHolding manager (\h -> h.account == treasury)
+  redeemed <- submit manager $ exerciseCmd vaultCid HandleRedeem with
+    requestCid = redeemRequest.requestCid; handlerCid = toInterfaceContractId @IRedeemHandler redeemHandlerCid
+    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- treasuryCashForRedeem]
+    allocationFactoryCid = testAllocationFactoryCid cashRegistry
+    settlementFactoryCid = testSettlementFactoryCid cashRegistry; extraArgs = emptyExtraArgs
+  assertMsg "redeem uses the updated share price and charges one USDCx"
+    (redeemed.sharePrice == 1.1 && redeemed.redeemedShares == 500.0
+      && redeemed.amount == 550.0 && redeemed.receivedAmount == 549.0 && redeemed.fee == 1.0)
+  [(_, finalShares)] <- query @Share depositor
+  assertMsg "500 unlocked shares remain after the burn" (finalShares.shares == 500.0 && finalShares.lock == None)
+  None <- queryContractId depositor redeemRequest.requestCid
+  assertCashBalance depositor (basicAccount depositor) 549.0
+  assertCashBalance manager feeTreasury 2.0
+  assertCashBalance manager treasury 350.0
+  [(_, finalSol)] <- queryFilter @Asset.TokenizedAssetHolding manager (\h -> h.account == treasury)
+  assertMsg "redeem preserves the remaining investment" (finalSol.amount == 1.0 && finalSol.lock == None)
+  assertValuation manager vaultId (350.0 + finalSol.amount * 200.0) 500.0
+  -- ------------------------------------------------------------
+
+-- Repeated checks stay small so the sequence of ledger operations remains visible.
+assertCashBalance : Party -> Account -> Decimal -> Script ()
+assertCashBalance party account expected = script do
+  holdings <- queryFilter @Cash.USDCxHolding party (\h -> h.account == account)
+  assertMsg ("unexpected USDCx balance for " <> show account)
+    (sum [h.amount | (_, h) <- holdings] == expected && all (\(_, h) -> h.lock == None) holdings)
+
+assertValuation : Party -> Text -> Decimal -> Decimal -> Script ()
+assertValuation manager vaultId expectedNav expectedSupply = script do
+  Some (_, valuation) <- queryByKey @NAV manager (manager, vaultId)
+  assertMsg "NAV and share supply match the portfolio"
+    (valuation.nav == expectedNav && valuation.totalShares == expectedSupply)
