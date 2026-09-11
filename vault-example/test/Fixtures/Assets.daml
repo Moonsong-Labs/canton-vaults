@@ -1,0 +1,44 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Fixtures.Assets where
+
+import Daml.Script
+import USDCx (USDCxHolding(..), USDCxRegistry)
+import Splice.Api.Token.AllocationInstructionV2 (AllocationFactory)
+import Splice.Api.Token.AllocationV2 (SettlementFactory)
+import Splice.Api.Token.HoldingV2 (Account(..), InstrumentId)
+import Splice.Api.Token.MetadataV1
+
+basicAccount : Party -> Account
+basicAccount owner = Account with
+  owner = Some owner
+  provider = None
+  id = ""
+
+emptyExtraArgs : ExtraArgs
+emptyExtraArgs = ExtraArgs with
+  context = emptyChoiceContext
+  meta = emptyMetadata
+
+data USDCxFixture = USDCxFixture with
+  issuer : Party
+  instrumentId : InstrumentId
+  allocationFactoryCid : ContractId USDCxRegistry
+    deriving (Eq, Show)
+
+testAllocationFactoryCid : USDCxFixture -> ContractId AllocationFactory
+testAllocationFactoryCid registry = toInterfaceContractId @AllocationFactory registry.allocationFactoryCid
+
+testSettlementFactoryCid : USDCxFixture -> ContractId SettlementFactory
+testSettlementFactoryCid registry = toInterfaceContractId @SettlementFactory registry.allocationFactoryCid
+
+issueHolding : USDCxFixture -> Party -> Decimal -> Script (ContractId USDCxHolding)
+issueHolding registry owner amount =
+  submit (actAs [registry.issuer, owner]) $ createCmd USDCxHolding with
+    admin = registry.issuer
+    account = basicAccount owner
+    instrumentId = registry.instrumentId
+    amount
+    lock = None
+    observers = []
