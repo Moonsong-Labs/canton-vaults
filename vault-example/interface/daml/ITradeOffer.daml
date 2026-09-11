@@ -1,0 +1,50 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module ITradeOffer where
+
+import IVault (IVault)
+import Splice.Api.Token.HoldingV2 (InstrumentId, Holding)
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+
+-- Direction is expressed from the vault's perspective.
+data TradeDirection = BuyAsset | SellAsset
+  deriving (Eq, Show)
+
+data TradeTerms = TradeTerms with
+  direction : TradeDirection
+  asset : InstrumentId
+  currency : InstrumentId
+  quantity : Decimal
+  unitPrice : Decimal
+    deriving (Eq, Show)
+
+data TradeSettlement = TradeSettlement with
+  quantity : Decimal
+  cashAmount : Decimal
+    deriving (Eq, Show)
+
+data TradeOfferInfo = TradeOfferInfo with
+  vaultId : Text
+  manager : Party
+  terms : TradeTerms
+  expiresAt : Time
+    deriving (Eq, Show)
+
+interface ITradeOffer where
+  viewtype TradeOfferInfo
+
+  executeTrade : ContractId ITradeOffer -> ContractId IVault
+    -> [ContractId Holding] -> ExtraArgs -> Update TradeSettlement
+
+  -- The offer implementation carries the counterparty's settlement authority.
+  choice ExecuteTrade : TradeSettlement
+    with
+      vaultCid : ContractId IVault
+      treasuryHoldingCids : [ContractId Holding]
+      extraArgs : ExtraArgs
+    controller (view this).manager
+    do executeTrade this self vaultCid treasuryHoldingCids extraArgs
+
+tradeAmount : TradeTerms -> Decimal
+tradeAmount terms = terms.quantity * terms.unitPrice
