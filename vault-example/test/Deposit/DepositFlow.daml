@@ -1,0 +1,122 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Deposit.DepositFlow where
+
+import Daml.Script
+import Splice.Api.Token.HoldingV2
+
+import AccessAttestation qualified as Attestation
+import DepositHandler
+import Fixtures.Assets
+import FlatFee
+import IAccessAttestation
+import IDepositHandler
+import IFee
+import NAV
+import Share (shareInstrumentId)
+import ShareRegistry
+import USDCx (USDCxHolding, USDCxRegistry(..))
+import Vault
+import VaultAccess qualified as Access
+
+deposit : Script ()
+deposit = script do
+  -- Parties and accounts: vault capital and manager fees use separate destinations.
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+  issuer <- allocateParty "Token issuer"
+  let instrumentId = InstrumentId with admin = issuer; id = "USDCx"
+      vaultId = "treasury-vault"
+      treasury = (basicAccount manager) with id = vaultId
+      feeTreasury = treasury with id = vaultId <> "-fees"
+
+  -- A local token registry supplies CIP-112 holdings and allocation/settlement factories.
+  rulesCid <- submit issuer $ createCmd USDCxRegistry with
+    admin = issuer; instrumentId; observers = [depositor, manager]
+  let registry = USDCxFixture with issuer; instrumentId; allocationFactoryCid = rulesCid
+
+  -- Initial funding gives the depositor enough USDCx for the deposit and change.
+  holdingCid <- issueHolding registry depositor 150.0
+
+  -- Create the vault with its accepted asset and both treasury accounts.
+  vaultCid <- submit manager $ createCmd Vault with
+    vaultId; manager; name = "Treasury Vault"; acceptedInstrument = instrumentId
+    treasury; feeTreasury
+
+  -- Record completed off-ledger onboarding, scoped to this vault.
+  approvalCid <- submit manager $ createCmd Attestation.AccessAttestation with
+    manager; depositor; vaultIds = [vaultId]; evidenceHash = None
+
+  -- GrantAccess validates the attestation and creates the depositor's VaultAccess.
+  -- This permission is the entry point for subsequent deposit requests.
+  accessCid <- submit manager $ exerciseCmd vaultCid GrantAccess with
+    depositor; attestationCid = toInterfaceContractId @IAccessAttestation approvalCid
+
+  -- The share registry records the CIP-112 mint event when the deposit settles.
+  shareRegistryCid <- submit manager $ createCmd ShareRegistry with vaultId; manager
+
+  -- Configure private processing through IFee, using the one-USDCx implementation.
+  feeCid <- submit manager $ createCmd FlatFee with manager
+  handlerCid <- submit manager $ createCmd DepositHandler with
+    vaultId; manager; feeCid = toInterfaceContractId @IFee feeCid
+
+  -- Seed a valuation snapshot: 1,200 USDCx / 1,000 shares sets the price to 1.2.
+  now <- getTime
+  _ <- submit manager $ createCmd NAV with
+    vaultId; manager; nav = 1200.0; totalShares = 1000.0; updatedAt = now; auditors = []
+
+  -- Deposit reserves 121 USDCx while the request awaits the manager's decision.
+  requestCid <- submit depositor $ exerciseCmd accessCid Access.Deposit with
+    inputHoldingCids = [toInterfaceContractId @Holding holdingCid]
+    amount = 121.0
+    allocationFactoryCid = testAllocationFactoryCid registry
+    extraArgs = emptyExtraArgs
+
+  -- The pending request references the allocation holding the reserved funds.
+  Some request <- queryContractId depositor requestCid
+  Some allocation <- queryInterfaceContractId depositor request.allocationCid
+  [lockedCid] <- pure allocation.holdingCids
+  Some locked <- queryInterfaceContractId depositor lockedCid
+  assertMsg "deposit funds are reserved" (locked.amount == 121.0 && locked.lock /= None)
+
+  -- The manager accepts via HandleDeposit: private pricing, settlement and minting
+  -- share one transaction. Net 120 at price 1.2 issues 100 shares; the fee is 1.
+  result <- submit manager $ exerciseCmd accessCid Access.HandleDeposit with
+    requestCid
+    handlerCid = toInterfaceContractId @IDepositHandler handlerCid
+    settlementFactoryCid = testSettlementFactoryCid registry
+    shareRegistryCid
+    extraArgs = emptyExtraArgs
+
+  -- Check the processing result and the actual share holding visible to the depositor.
+  assertMsg "deposit applies the fee and issues the quoted shares"
+    (result.amount == 121.0 && result.fee == 1.0
+      && result.sharePrice == 1.2 && result.mintedShares == 100.0)
+  Some shares <- queryInterfaceContractId depositor (toInterfaceContractId @Holding result.shareCid)
+  assertMsg "depositor receives vault shares as CIP-112 holdings"
+    (shares.account == basicAccount depositor && shares.amount == 100.0
+      && shares.instrumentId == shareInstrumentId manager vaultId)
+
+  -- Final balances separate vault capital from fees and preserve the depositor's change.
+  holdings <- query @USDCxHolding manager
+  assertMsg "treasury receives the net deposit"
+    (sum [h.amount | (_, h) <- holdings, h.account == treasury, h.lock == None] == 120.0)
+  assertMsg "fee treasury receives one USDCx"
+    (sum [h.amount | (_, h) <- holdings, h.account == feeTreasury, h.lock == None] == 1.0)
+
+  -- Funding 121 from a holding of 150 leaves 29 USDCx available to the depositor.
+  change <- query @USDCxHolding depositor
+  assertMsg "depositor retains the unspent balance"
+    (sum [h.amount | (_, h) <- change, h.account == basicAccount depositor, h.lock == None] == 29.0)
+
+  -- Private accounting adds 120 in net assets and the 100 newly issued shares.
+  Some (_, nav) <- queryByKey @NAV manager (manager, vaultId)
+  assertMsg "NAV includes net capital and the new shares"
+    (nav.nav == 1320.0 && nav.totalShares == 1100.0)
+
+  -- Settlement consumes the request and allocation; access remains for future deposits.
+  None <- queryContractId depositor requestCid
+  None <- queryInterfaceContractId depositor request.allocationCid
+  Some _ <- queryContractId depositor accessCid
+  pure ()
