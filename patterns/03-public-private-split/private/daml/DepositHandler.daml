@@ -1,0 +1,24 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module DepositHandler where
+
+import IDepositHandler
+
+template DepositHandler
+  with
+    manager : Party
+    maxDeposit : Decimal
+  where
+    signatory manager
+    ensure maxDeposit > 0.0
+
+    interface instance IDepositHandler for DepositHandler where
+      view = DepositHandlerInfo with manager
+
+      -- Internal business logic lives here, behind the public interface.
+      -- This example uses a private deposit limit. VaultAccess invokes the method
+      -- within a manager-only exercise, keeping these rules on the manager's PN.
+      handleDeposit amount = do
+        assertMsg "deposit amount must be positive" (amount > 0.0)
+        assertMsg "deposit exceeds the private limit" (amount <= maxDeposit)

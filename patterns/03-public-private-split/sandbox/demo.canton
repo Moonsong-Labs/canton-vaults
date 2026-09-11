@@ -22,45 +22,45 @@ managerPN.synchronizers.connect_local(sequencer, alias = "vault")
 val pattern = "patterns/03-public-private-split"
 depositorPN.dars.upload(s"$pattern/public/.daml/dist/deposit-public-0.1.0.dar")
 managerPN.dars.upload(s"$pattern/public/.daml/dist/deposit-public-0.1.0.dar")
-managerPN.dars.upload(s"$pattern/private/.daml/dist/deposit-policy-0.1.0.dar")
+managerPN.dars.upload(s"$pattern/private/.daml/dist/deposit-handler-0.1.0.dar")
 
 val depositor = depositorPN.parties.enable("Depositor", synchronizer = Some("vault"), synchronizeParticipants = Seq(depositorPN, managerPN))
 val manager = managerPN.parties.enable("Manager", synchronizer = Some("vault"), synchronizeParticipants = Seq(depositorPN, managerPN))
 val publicPackage = depositorPN.packages.find_by_module("DepositRequest").head.packageId
-val policyPackage = managerPN.packages.find_by_module("DepositPolicy").head.packageId
+val handlerPackage = managerPN.packages.find_by_module("DepositHandler").head.packageId
 val publicPackagesBefore = depositorPN.packages.list().map(_.packageId).toSet
-require(!publicPackagesBefore.contains(policyPackage), "Policy package leaked to depositor PN")
+require(!publicPackagesBefore.contains(handlerPackage), "Handler package leaked to depositor PN")
 
 def created(tx: Transaction, entity: String): CreatedEvent =
   tx.events.flatMap(_.event.created).find(_.getTemplateId.entityName == entity).getOrElse(
     sys.error(s"Missing $entity creation in ${tx.updateId}")
   )
 
-val policyTx = managerPN.ledger_api.commands.submit(Seq(manager), Seq(
-  ledger_api_utils.create(policyPackage, "DepositPolicy", "DepositPolicy", Map("manager" -> manager, "maxDeposit" -> 2000.0))
+val handlerTx = managerPN.ledger_api.commands.submit(Seq(manager), Seq(
+  ledger_api_utils.create(handlerPackage, "DepositHandler", "DepositHandler", Map("manager" -> manager, "maxDeposit" -> 2000.0))
 ))
-val policy = created(policyTx, "DepositPolicy")
-val processorTx = managerPN.ledger_api.commands.submit(Seq(manager), Seq(
-  ledger_api_utils.create(publicPackage, "DepositProcessor", "DepositProcessor", Map(
-    "manager" -> manager,
-    "depositor" -> depositor,
-    "policyCid" -> LfContractId.assertFromString(policy.contractId)
+val handler = created(handlerTx, "DepositHandler")
+
+val accessTx = managerPN.ledger_api.commands.submit(Seq(manager), Seq(
+  ledger_api_utils.create(publicPackage, "VaultAccess", "VaultAccess", Map(
+    "manager" -> manager, "depositor" -> depositor, "vaultId" -> "vault-1"
   ))
 ))
-val processor = created(processorTx, "DepositProcessor")
+val access = created(accessTx, "VaultAccess")
 
 val requestTx = depositorPN.ledger_api.commands.submit(Seq(depositor), Seq(
-  ledger_api_utils.create(publicPackage, "DepositRequest", "DepositRequest", Map(
-    "manager" -> manager, "depositor" -> depositor,
+  ledger_api_utils.exercise(publicPackage, "VaultAccess", "VaultAccess", "Deposit", Map(
     "amount" -> 1500.0
-  ))
-), optTimeout = Some(NonNegativeDuration.ofSeconds(30)))
+  ), access.contractId)
+), optTimeout = Some(NonNegativeDuration.ofSeconds(30)), transactionShape = TransactionShape.TRANSACTION_SHAPE_LEDGER_EFFECTS)
+require(requestTx.events.flatMap(_.event.exercised).map(_.choice) == Seq("Deposit"), "Depositor must request through VaultAccess.Deposit")
 val request = created(requestTx, "DepositRequest")
 
 val accepted = managerPN.ledger_api.commands.submit(Seq(manager), Seq(
-  ledger_api_utils.exercise("Accept", Map(
-    "requestCid" -> LfContractId.assertFromString(request.contractId)
-  ), processor)
+  ledger_api_utils.exercise(publicPackage, "VaultAccess", "VaultAccess", "HandleDeposit", Map(
+    "requestCid" -> LfContractId.assertFromString(request.contractId),
+    "handlerCid" -> LfContractId.assertFromString(handler.contractId)
+  ), access.contractId)
 ), optTimeout = Some(NonNegativeDuration.ofSeconds(30)), transactionShape = TransactionShape.TRANSACTION_SHAPE_LEDGER_EFFECTS)
 
 // The depositor's own API proves which events reached its participant.
@@ -73,9 +73,12 @@ val publicTx = depositorPN.ledger_api.updates.transactions(
 val managerExercises = accepted.events.flatMap(_.event.exercised)
 val managerChoices = managerExercises.map(_.choice)
 val publicExercises = publicTx.events.flatMap(_.event.exercised)
-require(managerChoices == Seq("Accept", "CheckDeposit", "Settle"), s"Unexpected manager view: $managerChoices")
-require(managerExercises(1).getInterfaceId.entityName == "IDepositPolicy", "Policy check must use IDepositPolicy")
-require(publicExercises.map(_.choice) == Seq("Settle"), s"Private exercises leaked: $publicExercises")
+require(managerChoices == Seq("HandleDeposit", "Consume"), s"Unexpected manager view: $managerChoices")
+require(managerExercises.head.getTemplateId.entityName == "VaultAccess", "Processing must start on VaultAccess")
+require(!managerExercises.head.consuming, "VaultAccess must remain active")
+require(publicExercises.map(_.choice) == Seq("Consume"), s"Private processing leaked: $publicExercises")
+require(publicExercises.head.getTemplateId.entityName == "DepositRequest", "Acceptance must consume DepositRequest")
+require(publicExercises.head.consuming, "Acceptance must consume the request")
 val receipt = created(publicTx, "DepositReceipt")
 require(receipt.contractId == created(accepted, "DepositReceipt").contractId, "Receipt mismatch between PNs")
 require(publicTx.updateId == accepted.updateId, "Settlement must share the acceptance transaction ID")
@@ -83,11 +86,12 @@ val amount = BigDecimal(receipt.getCreateArguments.fields.find(_.label == "amoun
 require(amount == BigDecimal(1500), s"Unexpected receipt amount: $amount")
 val depositorContracts = depositorPN.ledger_api.state.acs.of_party(depositor)
 require(depositorContracts.forall(_.event.contractId != request.contractId), "Request was not consumed")
-require(depositorContracts.exists(_.event.contractId == processor.contractId), "Depositor must see the public processor")
-require(depositorContracts.forall(_.event.contractId != policy.contractId), "Policy contract leaked to depositor")
+require(depositorContracts.forall(_.event.contractId != handler.contractId), "Handler contract leaked to depositor")
+require(depositorContracts.exists(_.event.contractId == access.contractId), "Depositor must still see VaultAccess")
+require(managerPN.ledger_api.state.acs.of_party(manager).exists(_.event.contractId == handler.contractId), "Handler must remain active")
 require(depositorPN.packages.list().map(_.packageId).toSet == publicPackagesBefore, "Depositor packages changed during settlement")
 
 println(s"Manager choices: ${managerChoices.mkString(", ")}")
 println(s"Depositor choices: ${publicExercises.map(_.choice).mkString(", ")}")
 println(s"Shared settlement transaction: ${publicTx.updateId}")
-println("Two-PN deposit passed: amount 1500, private policy package absent from depositor PN.")
+println("Two-PN deposit passed: VaultAccess calls the private interface method, both parties see the receipt for 1500.")

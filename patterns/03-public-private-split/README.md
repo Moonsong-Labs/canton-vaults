@@ -43,17 +43,18 @@ keeps to itself.
 
 ### Packages
 
-1. `deposit-interface` (`interface/`): `IDepositPolicy` with `DepositPolicyView`
-   and the nonconsuming `CheckDeposit` choice.
-2. `deposit-public` (`public/`): `DepositRequest`, `DepositProcessor`, and
-   `DepositReceipt`. `DepositProcessor.policyCid` is a
-   `ContractId IDepositPolicy`.
-3. `deposit-policy` (`private/`): `DepositPolicy`, which implements
-   `IDepositPolicy` with a `maxDeposit` limit.
+1. `deposit-interface` (`interface/`): `IDepositHandler` declares the
+   `handleDeposit` method. Its `DepositHandlerInfo` view exposes the manager.
+2. `deposit-public` (`public/`): `VaultAccess`, `DepositRequest`, and
+   `DepositReceipt`. `VaultAccess.HandleDeposit` receives a request CID and a
+   `ContractId IDepositHandler`.
+3. `deposit-handler` (`private/`): `DepositHandler` implements `IDepositHandler`
+   with a private `maxDeposit` limit.
 
 The sandbox verifies package separation for one implementation; an upgrade
 between package versions is outside this example. Token transfers are outside
-this example; `Settle` records a receipt.
+this example; `Consume` records a receipt without transferring assets or issuing
+shares.
 
 ### Flow
 
@@ -64,60 +65,30 @@ sequenceDiagram
     end
     box Both PNs: public packages
     participant R as DepositRequest
-    participant P as DepositProcessor
+    participant A as VaultAccess
     end
     box Manager PN
     participant M as manager
-    participant PLY as DepositPolicy (private)
+    participant H as DepositHandler (private)
     end
-    D->>R: create DepositRequest (amount)
-    M->>P: Accept (requestCid)
-    P->>PLY: IDepositPolicy.CheckDeposit (amount)
-    Note over PLY: checks amount <= maxDeposit
-    PLY-->>P: check passed
-    P->>R: Settle
+    M->>A: create VaultAccess (depositor, vaultId)
+    D->>A: Deposit (amount)
+    A->>R: create DepositRequest (vaultId, amount)
+    M->>A: HandleDeposit (requestCid, handlerCid)
+    A->>H: IDepositHandler.handleDeposit (amount)
+    Note over H: private business logic
+    H-->>A: check passed
+    A->>R: Consume
     R-->>D: DepositReceipt (amount), signed by both
-    Note over R,PLY: Accept contains both exercises in one transaction.
-    Note over D,R: Depositor PN validates Settle. Cancel or Reject can close an open request.
 ```
 
-#### Contracts and choices
+`HandleDeposit` is nonconsuming, the manager is the sole signatory of
+`VaultAccess`, and the depositor is a contract observer. This keeps the private
+processing outside the depositor's validation scope.
 
-- **`DepositRequest`**: signed by the depositor, observed by the manager.
-  Fixes a positive amount. `Cancel` belongs to the depositor; `Reject` and
-  `Settle` belong to the manager. Each choice consumes the request.
-- **`DepositProcessor`**: signed by the manager, observed by the depositor.
-  Its nonconsuming `Accept` checks that the request matches both parties,
-  calls the policy through `IDepositPolicy`, then exercises `Settle`.
-- **`DepositPolicy`**: signed by the manager. Implements the interface's
-  nonconsuming `CheckDeposit`, requiring a positive amount within `maxDeposit`.
-- **`DepositReceipt`**: signed by both parties, created by `Settle` with the
-  original request amount. Token transfers are outside this example.
-
-The request's signature supplies the depositor's authorization for the receipt.
-The manager submits as itself only.
-
-#### Why `Accept` lives on the processor
-
-The depositor observes the processor, so it can see the contract and its
-interface-typed policy reference. The manager submits `Accept` directly as the
-root exercise. It is nonconsuming and the manager is the processor's sole
-signatory and the choice's controller. Contract observers are excluded from the
-informees of a nonconsuming exercise unless they also have another informing
-role. The policy branch therefore stays manager-only.
-
-`Settle` is a sibling of `CheckDeposit`. It exercises the depositor-signed
-request, making that settlement and its receipt visible to both parties.
-
-Putting `Accept` on the depositor-signed request would make the depositor a
-witness of its nested policy call. An interface preserves that visibility.
-In an isolated two-PN check, this arrangement failed package resolution while
-the private DAR file was absent from the depositor PN. It succeeded after
-uploading that file there, exposing both `Accept` and `CheckDeposit` to the depositor.
-See Canton's [privacy rules](https://docs.digitalasset.com/overview/3.5/explanations/ledger-model/ledger-privacy.html).
-
-The manager can also call `Settle` directly. The policy is an internal decision
-rule; the receipt records the manager's acceptance of the authorized amount.
+`Consume` consumes the request and carries the depositor's authorization to
+create a receipt signed by both parties. The manager can also call `Consume`
+directly; the private limit is an internal processing rule.
 
 ### Run the tests
 
@@ -131,10 +102,11 @@ make sandbox-public-private
 The two Daml tests cover an accepted deposit and rejection by the private limit.
 The sandbox starts two in-memory PNs, a sequencer, and a mediator. It uploads
 the public DAR file (including its interface dependency) to both PNs and the
-private DAR file to the manager PN only, then checks:
+private DAR file to the manager PN only. The expected flow is:
 
-- The manager sees `Accept`, `CheckDeposit` through `IDepositPolicy`, and `Settle`.
-- The depositor sees the processor contract and only the `Settle` exercise.
-  The private policy contract and package remain absent from its PN.
+- The depositor creates the request through `VaultAccess.Deposit`.
+- During processing, the manager sees `HandleDeposit` and `Consume`; the
+  depositor sees `Consume`. The private handler contract and package remain
+  absent from the depositor's PN.
 - Both parties see the same receipt for 1,500 under the same transaction ID.
   The request is consumed and the depositor's package inventory stays unchanged.
