@@ -98,7 +98,7 @@ template DepositRequest
           _ -> fail "deposit settlement returned unexpected results"
 
         -- Settlement, minting and its CIP-112 event must commit together.
-        let share = Share with vaultId, manager, depositor; shares = quote.shares
+        let share = Share with vaultId, manager, depositor; shares = quote.shares; lock = None
         shareCid <- create share
         exercise (toInterfaceContractId @EventLog shareRegistryCid) (shareMintEvent share shareCid)
         pure DepositSettlement with

@@ -1,0 +1,33 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module ShareEvents where
+
+import DA.TextMap qualified as TextMap
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.TransferEventsV2
+
+shareInstrumentId : Party -> Text -> InstrumentId
+shareInstrumentId manager vaultId = InstrumentId with admin = manager; id = "vault-share:" <> vaultId
+
+shareAccount : Party -> Account
+shareAccount owner = Account with owner = Some owner; provider = None; id = ""
+
+shareBurnAccount : Account
+shareBurnAccount = Account with owner = None; provider = None; id = "cip-112/burn"
+
+-- Splits and unlocks preserve the balance and therefore have no transfer legs.
+shareChangeEvent
+  : Party -> Party -> Text -> [ContractId Holding] -> [ContractId Holding]
+  -> [TransferLegSide] -> EventLog_HoldingsChange
+shareChangeEvent manager depositor reason inputs outputs legs = EventLog_HoldingsChange with
+  admin = manager
+  account = shareAccount depositor
+  inputHoldingCids = inputs
+  outputHoldingCids = outputs
+  transferLegSides = legs
+  observers = [depositor]
+  extraArgs = ExtraArgs with
+    context = emptyChoiceContext
+    meta = Metadata with values = TextMap.fromList [("splice.lfdecentralizedtrust.org/reason", reason)]

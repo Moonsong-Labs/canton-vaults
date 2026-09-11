@@ -1,18 +1,21 @@
 -- SPDX-FileCopyrightText: 2026 Moonsong Labs
 -- SPDX-License-Identifier: MIT
 
-module Share where
+module Share (module Share, shareInstrumentId, shareAccount) where
 
+import DA.Map qualified as Map
+import DA.TextMap qualified as TextMap
+import Splice.Api.Token.AllocationV2
 import Splice.Api.Token.HoldingV2
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
+import Splice.Api.Token.TransferEventsV2 qualified as Events
+import RedeemRequest (RedeemRequest(..), redeemBurnSide)
+import ShareEvents
 
-shareInstrumentId : Party -> Text -> InstrumentId
-shareInstrumentId manager vaultId = InstrumentId with
-  admin = manager
-  id = "vault-share:" <> vaultId
-
-shareAccount : Party -> Account
-shareAccount owner = Account with owner = Some owner; provider = None; id = ""
+data RedeemResult = RedeemResult with
+  requestCid : ContractId RedeemRequest
+  remainingShareCid : Optional (ContractId Share)
+    deriving (Eq, Show)
 
 -- Issuance requires the manager and the depositor's signed request.
 template Share
@@ -21,6 +24,7 @@ template Share
     manager : Party
     depositor : Party
     shares : Decimal
+    lock : Optional Lock
   where
     signatory manager, depositor
     ensure vaultId /= "" && shares > 0.0
@@ -30,5 +34,142 @@ template Share
         account = shareAccount depositor
         instrumentId = shareInstrumentId manager vaultId
         amount = shares
-        lock = None
+        lock
         meta = emptyMetadata
+
+    -- Holding shares grants the right to request redemption independently of onboarding.
+    -- The requested amount stays locked while the remainder can be used again.
+    choice Redeem : RedeemResult
+      with
+        sharesToRedeem : Decimal
+        shareRegistryCid : ContractId Events.EventLog
+      controller depositor
+      do
+        assertMsg "locked shares cannot be redeemed again" (lock == None)
+        assertMsg "redeem amount must be positive and within the holding"
+          (sharesToRedeem > 0.0 && sharesToRedeem <= shares)
+        registry <- view <$> fetch shareRegistryCid
+        assertMsg "share registry belongs to another manager" (registry.admin == manager)
+
+        remainingShareCid <- if sharesToRedeem < shares then
+          Some <$> create this with shares = shares - sharesToRedeem
+        else pure None
+
+        lockedShareCid <- create this with
+          shares = sharesToRedeem
+          lock = Some Lock with
+            holders = [manager]
+            expiresAt = None
+            expiresAfter = None
+            context = Some "vault-redeem"
+        let settlement = SettlementInfo with
+              executors = [manager]
+              id = "vault-redeem"
+              cid = Some (coerceContractId self)
+              meta = emptyMetadata
+        now <- getTime
+        allocationCid <- create ShareAllocation with
+          vaultId, manager, depositor, lockedShareCid, shareRegistryCid, settlement
+          shares = sharesToRedeem
+          createdAt = now
+        exercise shareRegistryCid (shareChangeEvent manager depositor "vault-redeem-reserve"
+          [toInterfaceContractId @Holding self]
+          (map (toInterfaceContractId @Holding) ([lockedShareCid] <> [cid | Some cid <- [remainingShareCid]])) [])
+        requestCid <- create RedeemRequest with
+          vaultId, manager, depositor
+          shares = sharesToRedeem
+          allocationCid = toInterfaceContractId @Allocation allocationCid
+          settlement
+        pure RedeemResult with requestCid, remainingShareCid
+
+-- The allocation reserves a complete lot after the split. Its fixed leg permits
+-- burning that lot; cancellation and withdrawal recreate it without the lock.
+template ShareAllocation
+  with
+    vaultId : Text
+    manager : Party
+    depositor : Party
+    shares : Decimal
+    lockedShareCid : ContractId Share
+    shareRegistryCid : ContractId Events.EventLog
+    settlement : SettlementInfo
+    createdAt : Time
+  where
+    signatory manager, depositor
+    ensure vaultId /= "" && shares > 0.0 && settlement.executors == [manager]
+      && settlement.id == "vault-redeem" && settlement.cid /= None
+
+    interface instance Allocation for ShareAllocation where
+      view = AllocationView with
+        originalAllocationCid = None
+        settlement
+        allocation = AllocationSpecification with
+          admin = manager
+          authorizer = shareAccount depositor
+          transferLegSides = [redeemBurnSide manager vaultId shares]
+          settlementDeadline = None
+          nextIterationFunding = None
+          committed = False
+          meta = emptyMetadata
+        holdingCids = [toInterfaceContractId @Holding lockedShareCid]
+        createdAt
+        numIterations = 0
+        expiresAt = None
+        availableActions = Map.fromList
+          [(AA_Settle, [[manager]]), (AA_Cancel, [[manager]]), (AA_Withdraw, [[depositor]])]
+        meta = emptyMetadata
+
+      allocation_settleExtraObservers _ = [depositor]
+      allocation_cancelExtraObservers _ = [depositor]
+      allocation_withdrawExtraObservers _ = [manager]
+
+      allocation_settleImpl self arg = do
+        assertMsg "only the manager can settle the reserved shares" (arg.actors == [manager])
+        assertMsg "share redemption must complete its fixed burn leg"
+          (null arg.extraTransferLegSides && arg.nextIterationFunding == None)
+        validateReservedShare this
+        archive lockedShareCid
+        archive self
+        let burn = Events.TransferLegSide with
+              transferLegId = "vault-share-burn"
+              side = Events.SenderSide
+              otherside = shareBurnAccount
+              amount = shares
+              instrumentId = (shareInstrumentId manager vaultId).id
+              meta = emptyMetadata
+        exercise shareRegistryCid (shareChangeEvent manager depositor "vault-share-burn"
+          [toInterfaceContractId @Holding lockedShareCid] [] [burn])
+        pure AllocationResult with
+          output = AllocationResult_Settled None
+          authorizerHoldingCids = TextMap.empty
+          meta = emptyMetadata
+
+      allocation_cancelImpl self arg = do
+        assertMsg "only the manager can reject the reservation" (arg.actors == [manager])
+        releaseShares this self AllocationResult_Cancelled
+
+      allocation_withdrawImpl self arg = do
+        assertMsg "only the depositor can withdraw the reservation" (arg.actors == [depositor])
+        releaseShares this self AllocationResult_Withdrawn
+
+-- A concrete holding binds the reservation to shares issued by this vault.
+validateReservedShare : ShareAllocation -> Update ()
+validateReservedShare ShareAllocation{..} = do
+  holding <- fetch lockedShareCid
+  assertMsg "reserved share lot does not match the allocation"
+    (holding.vaultId == vaultId && holding.manager == manager && holding.depositor == depositor
+      && holding.shares == shares && holding.lock /= None)
+
+releaseShares : ShareAllocation -> ContractId Allocation -> AllocationResult_Output -> Update AllocationResult
+releaseShares allocation@ShareAllocation{..} self output = do
+  validateReservedShare allocation
+  holding <- fetch lockedShareCid
+  archive lockedShareCid
+  archive self
+  cid <- create holding with lock = None
+  exercise shareRegistryCid (shareChangeEvent manager depositor "vault-redeem-release"
+    [toInterfaceContractId @Holding lockedShareCid] [toInterfaceContractId @Holding cid] [])
+  pure AllocationResult with
+    output
+    authorizerHoldingCids = TextMap.fromList [((shareInstrumentId manager vaultId).id, [toInterfaceContractId @Holding cid])]
+    meta = emptyMetadata
