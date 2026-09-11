@@ -1,0 +1,50 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module RedeemHandler where
+
+import DA.Numeric qualified as Numeric
+import IFee
+import INAV
+import IRedeemHandler
+import NAV
+import Vault (Vault(..))
+
+template RedeemHandler
+  with
+    vaultId : Text
+    manager : Party
+    feeCid : ContractId IFee
+  where
+    signatory manager
+    ensure vaultId /= ""
+
+    interface instance IRedeemHandler for RedeemHandler where
+      view = RedeemHandlerInfo with vaultId, manager
+
+      -- Vault invokes this under a manager-only exercise. The holder's public
+      -- settlement receives the quote after the private valuation is complete.
+      handleRedeem instrumentId shares = do
+        (_, vault) <- fetchByKey @Vault (manager, vaultId)
+        (navCid, nav) <- fetchByKey @NAV (manager, vaultId)
+        assertMsg "redeem instrument does not match vault" (instrumentId == vault.acceptedInstrument)
+        assertMsg "redeem shares must be positive and within the supply"
+          (shares > 0.0 && shares <= nav.totalShares)
+        feeInfo <- view <$> fetch feeCid
+        assertMsg "fee model belongs to another manager" (feeInfo.manager == manager)
+        let sharePrice = (view (toInterface @INAV nav)).sharePrice
+            -- The last redemption drains NAV exactly; partial payouts round down.
+            amount = if shares == nav.totalShares then nav.nav
+              else redemptionAmount shares nav.nav nav.totalShares
+        fee <- exercise feeCid CalculateFee with amount
+        exercise navCid UpdateNAV with
+          newNav = nav.nav - amount
+          newTotalShares = nav.totalShares - shares
+        pure RedeemQuote with amount, fee, sharePrice
+
+-- Retain extra precision for the pro-rata calculation and floor the asset payout.
+redemptionAmount : Decimal -> Decimal -> Decimal -> Decimal
+redemptionAmount shares nav totalShares =
+  let exact = Numeric.div @20 (Numeric.mul @20 shares nav) (Numeric.cast @20 totalShares)
+      rounded = Numeric.cast @10 exact
+  in if Numeric.cast @20 rounded > exact then rounded - 0.0000000001 else rounded
