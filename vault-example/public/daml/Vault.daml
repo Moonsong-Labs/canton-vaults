@@ -13,6 +13,8 @@ import Splice.Api.Token.MetadataV1 (ExtraArgs)
 import IRedeemHandler
 import RedeemRequest
 import Share (ShareAllocation(..), validateReservedShare)
+import ITradeHandler
+import ITradeOffer
 
 template Vault
   with
@@ -52,6 +54,29 @@ template Vault
 
         create VaultAccess with vaultId, manager, depositor, attestationCid, acceptedInstrument, treasury, feeTreasury
 
+    -- Private investment checks run before the counterparty-visible settlement.
+    nonconsuming choice Buy : TradeSettlement
+      with
+        offerCid : ContractId ITradeOffer
+        handlerCid : ContractId ITradeHandler
+        treasuryHoldingCids : [ContractId Holding]
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        handler <- fetchTradeHandler this handlerCid
+        handleTrade handler (toInterfaceContractId @IVault self) BuyAsset offerCid treasuryHoldingCids extraArgs
+
+    nonconsuming choice Sell : TradeSettlement
+      with
+        offerCid : ContractId ITradeOffer
+        handlerCid : ContractId ITradeHandler
+        treasuryHoldingCids : [ContractId Holding]
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        handler <- fetchTradeHandler this handlerCid
+        handleTrade handler (toInterfaceContractId @IVault self) SellAsset offerCid treasuryHoldingCids extraArgs
+
     -- A manager-only root keeps private approval outside the holder's settlement
     -- subtree. Redemption remains available after onboarding access is revoked.
     nonconsuming choice HandleRedeem : RedeemSettlement
@@ -80,3 +105,11 @@ template Vault
         exercise requestCid ConsumeRedeem with
           vaultCid = toInterfaceContractId @IVault self
           quote, treasuryHoldingCids, allocationFactoryCid, settlementFactoryCid, extraArgs
+
+-- The public entry point only binds the handler to this vault.
+fetchTradeHandler : Vault -> ContractId ITradeHandler -> Update ITradeHandler
+fetchTradeHandler vault handlerCid = do
+  handler <- fetch handlerCid
+  assertMsg "trade handler belongs to another vault"
+    ((view handler).manager == vault.manager && (view handler).vaultId == vault.vaultId)
+  pure handler
