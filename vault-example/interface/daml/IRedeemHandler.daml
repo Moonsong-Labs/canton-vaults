@@ -1,0 +1,22 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module IRedeemHandler where
+
+import Splice.Api.Token.HoldingV2 (InstrumentId)
+
+data RedeemHandlerInfo = RedeemHandlerInfo with
+  vaultId : Text
+  manager : Party
+    deriving (Eq, Show)
+
+data RedeemQuote = RedeemQuote with
+  amount : Decimal
+  fee : Decimal
+  sharePrice : Decimal
+    deriving (Eq, Show)
+
+interface IRedeemHandler where
+  viewtype RedeemHandlerInfo
+
+  handleRedeem : InstrumentId -> Decimal -> Update RedeemQuote

@@ -1,0 +1,31 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module IDepositHandler where
+
+import DA.Numeric qualified as Numeric
+import Splice.Api.Token.HoldingV2 (InstrumentId)
+
+data DepositHandlerInfo = DepositHandlerInfo with
+  vaultId : Text
+  manager : Party
+    deriving (Eq, Show)
+
+data DepositQuote = DepositQuote with
+  fee : Decimal
+  sharePrice : Decimal
+  shares : Decimal
+    deriving (Eq, Show)
+
+interface IDepositHandler where
+  viewtype DepositHandlerInfo
+
+  handleDeposit : InstrumentId -> Decimal -> Update DepositQuote
+
+-- Round issuance down to the share holding's ten decimal places.
+sharesForDeposit : Decimal -> Decimal -> Decimal
+sharesForDeposit amount sharePrice =
+  let rounded = amount / sharePrice
+  in if Numeric.mul @20 rounded sharePrice > Numeric.cast @20 amount
+    then rounded - 0.0000000001
+    else rounded

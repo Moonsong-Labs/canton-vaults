@@ -1,0 +1,147 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module DepositRequest where
+
+import DA.TextMap qualified as TextMap
+import Splice.Api.Token.AllocationV2
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.TransferEventsV2 (EventLog)
+
+import AccessAttestation (validateAttestation)
+import IDepositHandler
+import IVaultAccess
+import Share
+import ShareRegistry
+
+data DepositSettlement = DepositSettlement with
+  amount : Decimal
+  fee : Decimal
+  sharePrice : Decimal
+  mintedShares : Decimal
+  shareCid : ContractId Share
+    deriving (Eq, Show)
+
+template DepositRequest
+  with
+    vaultId : Text
+    manager : Party
+    depositor : Party
+    vaultAccessCid : ContractId IVaultAccess
+    instrumentId : InstrumentId
+    amount : Decimal
+    allocationCid : ContractId Allocation
+    settlement : SettlementInfo
+  where
+    signatory depositor
+    observer manager
+    ensure vaultId /= "" && amount > 0.0 && instrumentId.id /= ""
+      && settlement.executors == [manager] && settlement.id == "vault-deposit"
+      && settlement.cid == Some (coerceContractId vaultAccessCid)
+
+    -- The request carries the depositor's authority for asset delivery and share issuance.
+    choice Consume : DepositSettlement
+      with
+        quote : DepositQuote
+        settlementFactoryCid : ContractId SettlementFactory
+        shareRegistryCid : ContractId ShareRegistry
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        access <- view <$> fetch vaultAccessCid
+        assertMsg "access does not match request"
+          (access.manager == manager && access.depositor == depositor && access.vaultId == vaultId
+            && access.acceptedInstrument == instrumentId)
+        validateAttestation access.attestationCid manager depositor vaultId
+        assertMsg "deposit quote must have a positive price and share amount"
+          (quote.sharePrice > 0.0 && quote.shares > 0.0)
+        assertMsg "fee must leave a positive net deposit" (quote.fee >= 0.0 && quote.fee < amount)
+        let netAmount = amount - quote.fee
+        assertMsg "quoted shares do not match deposit amount"
+          (quote.shares == sharesForDeposit netAmount quote.sharePrice)
+        registry <- fetch shareRegistryCid
+        assertMsg "share registry belongs to another vault"
+          (registry.manager == manager && registry.vaultId == vaultId)
+        allocation <- view <$> fetch allocationCid
+        validateFunding this allocation
+        factory <- exercise settlementFactoryCid SettlementFactory_PublicFetch with actors = [manager]
+        assertMsg "settlement factory belongs to another instrument admin"
+          (factory.admin == instrumentId.admin)
+
+        let leg = TransferLeg with
+              transferLegId = "vault-deposit"
+              sender = allocation.allocation.authorizer
+              receiver = access.treasury
+              amount = netAmount
+              instrumentId = instrumentId.id
+              meta = emptyMetadata
+            feeLeg = leg with
+              transferLegId = "vault-deposit-fee"
+              receiver = access.feeTreasury
+              amount = quote.fee
+            -- Both legs spend the same prefunded amount; fees stay outside NAV.
+            legs = [leg] <> [feeLeg | quote.fee > 0.0]
+        result <- exercise settlementFactoryCid SettlementFactory_SettleBatch with
+          settlement
+          transferLegs = legs
+          allocations = [FinalizedAllocation with
+            allocationCid
+            extraTransferLegSides = map senderSide legs
+            nextIterationFunding = None]
+          actors = [manager]
+          extraArgs
+        case result.allocationSettleResults of
+          [settled] -> case settled.output of
+            AllocationResult_Settled None -> pure ()
+            _ -> fail "deposit settlement did not complete"
+          _ -> fail "deposit settlement returned unexpected results"
+
+        -- Settlement, minting and its CIP-112 event must commit together.
+        let share = Share with vaultId, manager, depositor; shares = quote.shares; lock = None
+        shareCid <- create share
+        exercise (toInterfaceContractId @EventLog shareRegistryCid) (shareMintEvent share shareCid)
+        pure DepositSettlement with
+          amount, shareCid
+          fee = quote.fee
+          sharePrice = quote.sharePrice
+          mintedShares = quote.shares
+
+    choice Cancel : AllocationResult
+      with extraArgs : ExtraArgs
+      controller depositor
+      do
+        exercise allocationCid Allocation_Withdraw with actors = [depositor]; extraArgs
+
+    choice Reject : AllocationResult
+      with extraArgs : ExtraArgs
+      controller manager
+      do
+        exercise allocationCid Allocation_Cancel with actors = [manager]; extraArgs
+
+-- Bind settlement to the exact prefunded allocation and its locked holding.
+validateFunding : DepositRequest -> AllocationView -> Update ()
+validateFunding DepositRequest{..} allocation = do
+  assertMsg "allocation belongs to another settlement" (allocation.settlement == settlement)
+  assertMsg "allocation instrument admin does not match request"
+    (allocation.allocation.admin == instrumentId.admin)
+  assertMsg "allocation authorizer does not belong to depositor"
+    (allocation.allocation.authorizer.owner == Some depositor)
+  assertMsg "allocation must use deferred transfer legs" (null allocation.allocation.transferLegSides)
+  assertMsg "allocation funding does not match deposit"
+    (allocation.allocation.nextIterationFunding == Some (TextMap.fromList [(instrumentId.id, amount)]))
+  assertMsg "allocation must remain withdrawable" (not allocation.allocation.committed)
+  holdingCid <- case allocation.holdingCids of
+    [cid] -> pure cid
+    _ -> fail "deposit allocation must contain one locked holding"
+  holding <- view <$> fetch holdingCid
+  assertMsg "locked holding does not match deposit"
+    (holding.account == allocation.allocation.authorizer && holding.instrumentId == instrumentId
+      && holding.amount == amount && holding.lock /= None)
+
+-- The sender side authorizes delivery from the allocation to each destination.
+senderSide : TransferLeg -> TransferLegSide
+senderSide TransferLeg{..} = TransferLegSide with
+  transferLegId, amount, instrumentId, meta
+  side = SenderSide
+  otherside = receiver

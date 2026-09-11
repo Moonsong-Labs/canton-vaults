@@ -1,0 +1,115 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Vault where
+
+import IAccessAttestation
+import IVault
+import VaultAccess (VaultAccess(..))
+import Splice.Api.Token.HoldingV2 (Account(..), InstrumentId(..), Holding)
+import Splice.Api.Token.AllocationV2 (SettlementFactory)
+import Splice.Api.Token.AllocationInstructionV2 (AllocationFactory)
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import IRedeemHandler
+import RedeemRequest
+import Share (ShareAllocation(..), validateReservedShare)
+import ITradeHandler
+import ITradeOffer
+
+template Vault
+  with
+    vaultId : Text
+    manager : Party
+    name : Text
+    acceptedInstrument : InstrumentId
+    treasury : Account
+    feeTreasury : Account
+  where
+    signatory manager
+    ensure vaultId /= "" && name /= "" && acceptedInstrument.id /= ""
+      && treasury.owner == Some manager
+      && feeTreasury.owner == Some manager && feeTreasury /= treasury
+
+    -- The manager must keep one active vault per key; Canton permits duplicates.
+    key (manager, vaultId) : VaultKey
+    maintainer key._1
+
+    interface instance IVault for Vault where
+      view = VaultInfo with vaultId, manager, name, acceptedInstrument, treasury, feeTreasury
+
+    -- Consumers must recheck the approval so revocation takes effect after issuance.
+    nonconsuming choice GrantAccess : ContractId VaultAccess
+      with
+        depositor : Party
+        attestationCid : ContractId IAccessAttestation
+      controller manager
+      do
+        attestation <- view <$> fetch attestationCid
+        assertMsg "attestation manager does not match vault manager"
+          (attestation.manager == manager)
+        assertMsg "attestation depositor does not match access recipient"
+          (attestation.depositor == depositor)
+        assertMsg "vault is outside attestation scope"
+          (vaultId `elem` attestation.vaultIds)
+
+        create VaultAccess with vaultId, manager, depositor, attestationCid, acceptedInstrument, treasury, feeTreasury
+
+    -- Private investment checks run before the counterparty-visible settlement.
+    nonconsuming choice Buy : TradeSettlement
+      with
+        offerCid : ContractId ITradeOffer
+        handlerCid : ContractId ITradeHandler
+        treasuryHoldingCids : [ContractId Holding]
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        handler <- fetchTradeHandler this handlerCid
+        handleTrade handler (toInterfaceContractId @IVault self) BuyAsset offerCid treasuryHoldingCids extraArgs
+
+    nonconsuming choice Sell : TradeSettlement
+      with
+        offerCid : ContractId ITradeOffer
+        handlerCid : ContractId ITradeHandler
+        treasuryHoldingCids : [ContractId Holding]
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        handler <- fetchTradeHandler this handlerCid
+        handleTrade handler (toInterfaceContractId @IVault self) SellAsset offerCid treasuryHoldingCids extraArgs
+
+    -- A manager-only root keeps private approval outside the holder's settlement
+    -- subtree. Redemption remains available after onboarding access is revoked.
+    nonconsuming choice HandleRedeem : RedeemSettlement
+      with
+        requestCid : ContractId RedeemRequest
+        handlerCid : ContractId IRedeemHandler
+        treasuryHoldingCids : [ContractId Holding]
+        allocationFactoryCid : ContractId AllocationFactory
+        settlementFactoryCid : ContractId SettlementFactory
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        request <- fetch requestCid
+        assertMsg "redeem request belongs to another vault" (request.manager == manager && request.vaultId == vaultId)
+        -- Require this vault's allocation implementation before approving a burn.
+        allocation <- fetch (coerceContractId request.allocationCid : ContractId ShareAllocation)
+        assertMsg "share reservation does not match redeem request"
+          (allocation.manager == manager && allocation.vaultId == vaultId
+            && allocation.depositor == request.depositor && allocation.shares == request.shares
+            && allocation.settlement == request.settlement)
+        validateReservedShare allocation
+        handler <- fetch handlerCid
+        assertMsg "redeem handler belongs to another vault"
+          ((view handler).manager == manager && (view handler).vaultId == vaultId)
+        quote <- handleRedeem handler acceptedInstrument request.shares
+        exercise requestCid ConsumeRedeem with
+          vaultCid = toInterfaceContractId @IVault self
+          quote, treasuryHoldingCids, allocationFactoryCid, settlementFactoryCid, extraArgs
+
+-- The public entry point only binds the handler to this vault.
+fetchTradeHandler : Vault -> ContractId ITradeHandler -> Update ITradeHandler
+fetchTradeHandler vault handlerCid = do
+  handler <- fetch handlerCid
+  assertMsg "trade handler belongs to another vault"
+    ((view handler).manager == vault.manager && (view handler).vaultId == vault.vaultId)
+  pure handler

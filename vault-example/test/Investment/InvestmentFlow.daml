@@ -1,0 +1,130 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Investment.InvestmentFlow where
+
+import Daml.Script
+import DA.Time (addRelTime, hours)
+import Fixtures.Assets (basicAccount, emptyExtraArgs)
+import ITradeHandler
+import ITradeOffer
+import TradeHandler
+import TradeOffer qualified as Offer
+import TokenizedAsset qualified as Asset
+import USDCx qualified as Cash
+import Vault
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.AllocationV2 (Allocation)
+
+buyAndSell : Script ()
+buyAndSell = script do
+  InvestmentSetup{..} <- setupInvestment ()
+  let manager = vault.manager
+
+  -- Buy 1 SOL for 150 USDCx from a seller holding 2 SOL.
+  offerCid <- submit counterparty $ createCmd offer
+  _ <- submit manager $ exerciseCmd vaultCid Buy with
+    offerCid = toInterfaceContractId @ITradeOffer offerCid; handlerCid
+    treasuryHoldingCids = [cashCid]; extraArgs = emptyExtraArgs
+  None <- queryContractId manager offerCid
+  [(assetCid, purchased)] <- queryFilter @Asset.TokenizedAssetHolding manager (\h -> h.account == vault.treasury)
+  [(paymentCid, payment)] <- query @Cash.USDCxHolding counterparty
+  assertMsg "purchase exchanges cash for one unlocked SOL"
+    (purchased.amount == 1.0 && purchased.instrumentId == offer.terms.asset
+      && purchased.lock == None && payment.amount == 150.0)
+
+  -- Sell half the lot for 75 USDCx. The other half remains available in treasury.
+  let sale = offer with
+        terms = offer.terms with direction = SellAsset; quantity = 0.5
+        counterpartyHoldingCids = [toInterfaceContractId @Holding paymentCid]
+  saleCid <- submit counterparty $ createCmd sale
+  _ <- submit manager $ exerciseCmd vaultCid Sell with
+    offerCid = toInterfaceContractId @ITradeOffer saleCid; handlerCid
+    treasuryHoldingCids = [toInterfaceContractId @Holding assetCid]; extraArgs = emptyExtraArgs
+  None <- queryContractId manager saleCid
+
+  assets <- query @Asset.TokenizedAssetHolding manager
+  cash <- query @Cash.USDCxHolding manager
+  assertMsg "both accounts retain their expected SOL balances"
+    (sum [h.amount | (_, h) <- assets, h.account == vault.treasury] == 0.5
+      && sum [h.amount | (_, h) <- assets, h.account == offer.counterpartyAccount] == 1.5
+      && all (\(_, h) -> h.lock == None) assets)
+  assertMsg "cash balances reflect the purchase and partial sale"
+    (sum [h.amount | (_, h) <- cash, h.account == vault.treasury] == 325.0
+      && sum [h.amount | (_, h) <- cash, h.account == offer.counterpartyAccount] == 75.0
+      && all (\(_, h) -> h.lock == None) cash)
+
+failedDeliveryRollsBack : Script ()
+failedDeliveryRollsBack = script do
+  InvestmentSetup{..} <- setupInvestment ()
+  let manager = vault.manager
+      -- Treasury can pay 315 USDCx, but the seller only owns 2 SOL.
+      oversized = offer with terms = offer.terms with quantity = 2.1
+  offerCid <- submit counterparty $ createCmd oversized
+  submitMustFail manager $ exerciseCmd vaultCid Buy with
+    offerCid = toInterfaceContractId @ITradeOffer offerCid; handlerCid
+    treasuryHoldingCids = [cashCid]; extraArgs = emptyExtraArgs
+
+  -- Failure of asset delivery must restore the cash already processed in this
+  -- transaction, preserving the offer and leaving no payment or locked allocations.
+  Some originalCash <- queryInterfaceContractId manager cashCid
+  assertMsg "failed delivery restores treasury cash" (originalCash.amount == 400.0 && originalCash.lock == None)
+  Some _ <- queryContractId manager offerCid
+  [] <- query @Cash.USDCxHolding counterparty
+  [] <- queryInterface @Allocation manager
+  [(_, originalAsset)] <- query @Asset.TokenizedAssetHolding counterparty
+  assertMsg "seller keeps its unlocked SOL" (originalAsset.amount == 2.0 && originalAsset.lock == None)
+
+data InvestmentSetup = InvestmentSetup with
+  vault : Vault
+  vaultCid : ContractId Vault
+  counterparty : Party
+  offer : Offer.TradeOffer
+  handlerCid : ContractId ITradeHandler
+  cashCid : ContractId Holding
+    deriving (Eq, Show)
+
+-- Direct funding isolates investment from deposit/redeem. Distinct issuers exercise
+-- settlement across two registries without giving the manager either issuer's actAs.
+setupInvestment : () -> Script InvestmentSetup
+setupInvestment () = script do
+  manager <- allocateParty "Manager"
+  counterparty <- allocateParty "Counterparty"
+  cashIssuer <- allocateParty "USDCx issuer"
+  assetIssuer <- allocateParty "Asset issuer"
+  let currency = InstrumentId with admin = cashIssuer; id = "USDCx"
+      instrument = Asset.assetInstrumentId assetIssuer Asset.SOL
+      vaultId = "investment-vault"
+      treasury = (basicAccount manager) with id = vaultId
+      vault = Vault with
+        vaultId; manager; name = "Investment Vault"; acceptedInstrument = currency
+        treasury; feeTreasury = treasury with id = "fees"
+  vaultCid <- submit manager $ createCmd vault
+  cashRegistry <- submit cashIssuer $ createCmd Cash.USDCxRegistry with
+    admin = cashIssuer; instrumentId = currency; observers = [manager, counterparty]
+  assetRegistry <- submit assetIssuer $ createCmd Asset.TokenizedAssetRegistry with
+    admin = assetIssuer; instrumentId = instrument; observers = [manager, counterparty]
+  cashHolding <- submit (actAs [cashIssuer, manager]) $ createCmd Cash.USDCxHolding with
+    admin = cashIssuer; account = treasury; instrumentId = currency
+    amount = 400.0; lock = None; observers = []
+  assetHolding <- submit (actAs [assetIssuer, counterparty]) $ createCmd Asset.TokenizedAssetHolding with
+    admin = assetIssuer; account = basicAccount counterparty; instrumentId = instrument
+    amount = 2.0; lock = None; observers = [manager]
+  handler <- submit manager $ createCmd TradeHandler with
+    vaultId; manager; allowedAssets = [instrument]; maxTradeAmount = 400.0
+  now <- getTime
+  let offer = Offer.TradeOffer with
+        vaultId; manager; counterparty; counterpartyAccount = basicAccount counterparty
+        terms = TradeTerms with direction = BuyAsset; asset = instrument; currency; quantity = 1.0; unitPrice = 150.0
+        expiresAt = addRelTime now (hours 1)
+        counterpartyHoldingCids = [toInterfaceContractId @Holding assetHolding]
+        cashFactories = Offer.AssetFactories with
+          allocationFactoryCid = toInterfaceContractId cashRegistry
+          settlementFactoryCid = toInterfaceContractId cashRegistry
+        assetFactories = Offer.AssetFactories with
+          allocationFactoryCid = toInterfaceContractId assetRegistry
+          settlementFactoryCid = toInterfaceContractId assetRegistry
+  pure InvestmentSetup with
+    vault, vaultCid, counterparty, offer
+    handlerCid = toInterfaceContractId @ITradeHandler handler
+    cashCid = toInterfaceContractId @Holding cashHolding
