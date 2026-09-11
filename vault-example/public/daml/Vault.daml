@@ -6,7 +6,13 @@ module Vault where
 import IAccessAttestation
 import IVault
 import VaultAccess (VaultAccess(..))
-import Splice.Api.Token.HoldingV2 (Account(..), InstrumentId(..))
+import Splice.Api.Token.HoldingV2 (Account(..), InstrumentId(..), Holding)
+import Splice.Api.Token.AllocationV2 (SettlementFactory)
+import Splice.Api.Token.AllocationInstructionV2 (AllocationFactory)
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import IRedeemHandler
+import RedeemRequest
+import Share (ShareAllocation(..), validateReservedShare)
 
 template Vault
   with
@@ -45,3 +51,32 @@ template Vault
           (vaultId `elem` attestation.vaultIds)
 
         create VaultAccess with vaultId, manager, depositor, attestationCid, acceptedInstrument, treasury, feeTreasury
+
+    -- A manager-only root keeps private approval outside the holder's settlement
+    -- subtree. Redemption remains available after onboarding access is revoked.
+    nonconsuming choice HandleRedeem : RedeemSettlement
+      with
+        requestCid : ContractId RedeemRequest
+        handlerCid : ContractId IRedeemHandler
+        treasuryHoldingCids : [ContractId Holding]
+        allocationFactoryCid : ContractId AllocationFactory
+        settlementFactoryCid : ContractId SettlementFactory
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        request <- fetch requestCid
+        assertMsg "redeem request belongs to another vault" (request.manager == manager && request.vaultId == vaultId)
+        -- Require this vault's allocation implementation before approving a burn.
+        allocation <- fetch (coerceContractId request.allocationCid : ContractId ShareAllocation)
+        assertMsg "share reservation does not match redeem request"
+          (allocation.manager == manager && allocation.vaultId == vaultId
+            && allocation.depositor == request.depositor && allocation.shares == request.shares
+            && allocation.settlement == request.settlement)
+        validateReservedShare allocation
+        handler <- fetch handlerCid
+        assertMsg "redeem handler belongs to another vault"
+          ((view handler).manager == manager && (view handler).vaultId == vaultId)
+        quote <- handleRedeem handler acceptedInstrument request.shares
+        exercise requestCid ConsumeRedeem with
+          vaultCid = toInterfaceContractId @IVault self
+          quote, treasuryHoldingCids, allocationFactoryCid, settlementFactoryCid, extraArgs
