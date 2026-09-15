@@ -1,0 +1,20 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module ITradeHandler where
+
+import ITradeOffer
+import IVault (IVault)
+import Splice.Api.Token.HoldingV2 (Holding)
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+
+data TradeHandlerInfo = TradeHandlerInfo with
+  vaultId : Text
+  manager : Party
+    deriving (Eq, Show)
+
+interface ITradeHandler where
+  viewtype TradeHandlerInfo
+
+  handleTrade : ContractId IVault -> TradeDirection -> ContractId ITradeOffer
+    -> [ContractId Holding] -> ExtraArgs -> Update TradeSettlement

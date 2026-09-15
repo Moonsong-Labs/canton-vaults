@@ -1,0 +1,52 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module NAV where
+
+import IVault (VaultKey)
+import INAV
+
+template NAV
+  with
+    vaultId : Text
+    manager : Party
+    nav : Decimal
+    totalShares : Decimal
+    updatedAt : Time
+    auditors : [Party]
+  where
+    signatory manager
+    observer auditors
+    ensure
+      vaultId /= ""
+        && nav >= 0.0
+        && totalShares >= 0.0
+        && (totalShares > 0.0 || nav == 0.0)
+        && pricePerShare nav totalShares > 0.0
+
+    -- Updates retain this identity; the manager must avoid duplicate initial snapshots.
+    key (manager, vaultId) : VaultKey
+    maintainer key._1
+
+    interface instance INAV for NAV where
+      view = NAVInfo with
+        vaultId, manager, nav, totalShares, updatedAt
+        sharePrice = pricePerShare nav totalShares
+
+    choice UpdateNAV : ContractId NAV
+      with
+        newNav : Decimal
+        newTotalShares : Decimal
+      controller manager
+      do
+        now <- getTime
+        create this with
+          nav = newNav
+          totalShares = newTotalShares
+          updatedAt = now
+
+-- Empty vaults start at one unit per share. The invariant requires zero NAV
+-- at zero supply and a positive price for funded vaults.
+pricePerShare : Decimal -> Decimal -> Decimal
+pricePerShare nav totalShares =
+  if totalShares == 0.0 then 1.0 else nav / totalShares

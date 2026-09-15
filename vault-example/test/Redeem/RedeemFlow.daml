@@ -1,0 +1,128 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Redeem.RedeemFlow where
+
+import Daml.Script
+import Splice.Api.Token.HoldingV2
+
+import Fixtures.Assets
+import FlatFee
+import IFee
+import IRedeemHandler
+import NAV
+import RedeemHandler
+import Share
+import ShareRegistry
+import USDCx (USDCxHolding(..), USDCxRegistry(..))
+import Vault
+
+redeem : Script ()
+redeem = script do
+  -- Start with an existing vault, 100 issued shares and 120 USDCx in its treasury.
+  -- The setup is local to this test; redemption needs no onboarding permission.
+  RedeemSetup{..} <- setupRedeem ()
+  let manager = vault.manager
+
+  -- Share only the event registry needed for the split with the holder.
+  Some registryDisclosure <- queryDisclosure manager shareRegistryCid
+
+  -- The holder requests 40 shares: the original lot splits into 60 available and 40 reserved.
+  requested <- submit (actAs depositor <> disclose registryDisclosure) $ exerciseCmd shareCid Redeem with
+    sharesToRedeem = 40.0
+    shareRegistryCid = toInterfaceContractId shareRegistryCid
+  Some remainingCid <- pure requested.remainingShareCid
+  Some remaining <- queryContractId depositor remainingCid
+  assertMsg "the unredeemed shares remain available" (remaining.shares == 60.0 && remaining.lock == None)
+  None <- queryContractId depositor shareCid
+  Some request <- queryContractId depositor requested.requestCid
+  Some allocation <- queryInterfaceContractId depositor request.allocationCid
+  [lockedCid] <- pure allocation.holdingCids
+  Some locked <- queryInterfaceContractId depositor lockedCid
+  assertMsg "the allocation reserves exactly the requested shares"
+    (request.shares == 40.0 && locked.amount == 40.0 && locked.lock /= None
+      && locked.account == basicAccount depositor
+      && locked.instrumentId == shareInstrumentId manager vault.vaultId)
+
+  -- The manager invokes private pricing and then public settlement in one transaction.
+  -- At 1.2 per share, 40 shares pay 47 USDCx to the holder and 1 to fee treasury.
+  result <- submit manager $ exerciseCmd vaultCid HandleRedeem with
+    requestCid = requested.requestCid
+    handlerCid
+    treasuryHoldingCids = [treasuryHoldingCid]
+    allocationFactoryCid = testAllocationFactoryCid registry
+    settlementFactoryCid = testSettlementFactoryCid registry
+    extraArgs = emptyExtraArgs
+  assertMsg "redeem applies the quoted price and flat fee"
+    (result.redeemedShares == 40.0 && result.sharePrice == 1.2
+      && result.amount == 48.0 && result.fee == 1.0 && result.receivedAmount == 47.0)
+
+  -- Check actual asset balances and the sole remaining share lot after the burn.
+  received <- query @USDCxHolding depositor
+  assertMsg "the depositor receives the net payout"
+    (sum [h.amount | (_, h) <- received, h.account == basicAccount depositor, h.lock == None] == 47.0)
+  holdings <- query @USDCxHolding manager
+  assertMsg "treasury retains capital and fee treasury receives the fee"
+    (sum [h.amount | (_, h) <- holdings, h.account == vault.treasury, h.lock == None] == 72.0
+      && sum [h.amount | (_, h) <- holdings, h.account == vault.feeTreasury, h.lock == None] == 1.0)
+  [(finalShareCid, finalShare)] <- query @Share depositor
+  assertMsg "only the 60 unredeemed shares remain"
+    (finalShareCid == remainingCid && finalShare.shares == 60.0 && finalShare.lock == None)
+
+  -- NAV and supply decrease together; the request, allocation and reserved lot are consumed.
+  Some (_, nav) <- queryByKey @NAV manager (manager, vault.vaultId)
+  assertMsg "NAV reflects the gross payout and burned shares" (nav.nav == 72.0 && nav.totalShares == 60.0)
+  None <- queryContractId depositor requested.requestCid
+  None <- queryInterfaceContractId depositor request.allocationCid
+  None <- queryInterfaceContractId depositor lockedCid
+  pure ()
+
+data RedeemSetup = RedeemSetup with
+  vault : Vault
+  depositor : Party
+  vaultCid : ContractId Vault
+  shareCid : ContractId Share
+  shareRegistryCid : ContractId ShareRegistry
+  handlerCid : ContractId IRedeemHandler
+  registry : USDCxFixture
+  treasuryHoldingCid : ContractId Holding
+    deriving (Eq, Show)
+
+-- Seed a consistent starting balance directly so this test isolates redemption.
+setupRedeem : () -> Script RedeemSetup
+setupRedeem () = script do
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+  issuer <- allocateParty "Token issuer"
+  let vaultId = "treasury-vault"
+      instrumentId = InstrumentId with admin = issuer; id = "USDCx"
+      treasury = (basicAccount manager) with id = vaultId
+      vault = Vault with
+        vaultId; manager; name = "Treasury Vault"; acceptedInstrument = instrumentId
+        treasury; feeTreasury = treasury with id = vaultId <> "-fees"
+  vaultCid <- submit manager $ createCmd vault
+
+  -- The token registry and funded treasury supply the asset used for the payout.
+  rulesCid <- submit issuer $ createCmd USDCxRegistry with
+    admin = issuer; instrumentId; observers = [manager, depositor]
+  let registry = USDCxFixture with issuer; instrumentId; allocationFactoryCid = rulesCid
+  treasuryCid <- submit (actAs [issuer, manager]) $ createCmd USDCxHolding with
+    admin = issuer; account = treasury; instrumentId; amount = 120.0; lock = None; observers = []
+
+  -- Existing shares and NAV agree on a supply of 100 and a price of 1.2.
+  shareCid <- submit (actAs [manager, depositor]) $ createCmd Share with
+    vaultId; manager; depositor; shares = 100.0; lock = None
+  shareRegistry <- submit manager $ createCmd ShareRegistry with vaultId; manager
+  now <- getTime
+  _ <- submit manager $ createCmd NAV with
+    vaultId; manager; nav = 120.0; totalShares = 100.0; updatedAt = now; auditors = []
+
+  -- Configure the real private handler with the one-USDCx fee model.
+  feeCid <- submit manager $ createCmd FlatFee with manager
+  handler <- submit manager $ createCmd RedeemHandler with
+    vaultId; manager; feeCid = toInterfaceContractId @IFee feeCid
+  pure RedeemSetup with
+    vault, depositor, vaultCid, shareCid, registry
+    shareRegistryCid = shareRegistry
+    handlerCid = toInterfaceContractId @IRedeemHandler handler
+    treasuryHoldingCid = toInterfaceContractId @Holding treasuryCid

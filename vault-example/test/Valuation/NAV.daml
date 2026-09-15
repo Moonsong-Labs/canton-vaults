@@ -1,0 +1,60 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Valuation.NAV where
+
+import Daml.Script
+import DA.Time (seconds)
+
+import INAV
+import NAV
+
+updateValuation : Script ()
+updateValuation = script do
+  manager <- allocateParty "Manager"
+  auditor <- allocateParty "Auditor"
+  depositor <- allocateParty "Depositor"
+  let vaultId = "treasury-vault"
+      navKey = (manager, vaultId)
+  initialTime <- getTime
+
+  initialCid <- submit manager do
+    createCmd NAV with
+      vaultId, manager
+      nav = 0.0
+      totalShares = 0.0
+      updatedAt = initialTime
+      auditors = [auditor]
+  Some initialInfo <- queryInterfaceContractId manager
+    (toInterfaceContractId @INAV initialCid)
+  assertMsg "empty vault starts at one unit per share"
+    (initialInfo.sharePrice == 1.0)
+
+  passTime (seconds 30)
+  updateTime <- getTime
+  let update = UpdateNAV with
+        newNav = 1200.0
+        newTotalShares = 1000.0
+
+  -- Audit visibility leaves valuation updates under the manager's authority.
+  submitMustFail auditor do
+    exerciseCmd initialCid update
+  updatedCid <- submit manager do
+    exerciseByKeyCmd @NAV navKey update
+
+  -- The same key resolves the replacement snapshot after a consuming update.
+  Some (resolvedCid, _) <- queryByKey @NAV manager navKey
+  assertMsg "key resolves the updated NAV" (resolvedCid == updatedCid)
+  None <- queryContractId manager initialCid
+  Some info <- queryInterfaceContractId auditor
+    (toInterfaceContractId @INAV resolvedCid)
+  assertMsg "auditor sees the updated valuation through its interface"
+    (info == NAVInfo with
+      vaultId, manager
+      nav = 1200.0
+      totalShares = 1000.0
+      sharePrice = 1.2
+      updatedAt = updateTime)
+  None <- queryInterfaceContractId depositor
+    (toInterfaceContractId @INAV resolvedCid)
+  pure ()

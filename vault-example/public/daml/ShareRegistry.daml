@@ -1,0 +1,54 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module ShareRegistry where
+
+import DA.TextMap qualified as TextMap
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.TransferEventsV2
+
+import Share
+
+template ShareRegistry
+  with
+    vaultId : Text
+    manager : Party
+  where
+    signatory manager
+    ensure vaultId /= ""
+
+    interface instance EventLog for ShareRegistry where
+      view = EventLogView with admin = manager; meta = emptyMetadata
+
+      eventLog_holdingsChangeImpl _ event = do
+        assertMsg "event admin does not match share manager" (event.admin == manager)
+        owner <- case event.account.owner of
+          Some party -> pure party
+          None -> fail "share event requires an account owner"
+        assertMsg "share event must use the owner's basic account"
+          (event.account == shareAccount owner)
+        assertMsg "share owner must observe the event" (owner `elem` event.observers)
+        assertMsg "event uses another share instrument"
+          (all (\leg -> leg.instrumentId == (shareInstrumentId manager vaultId).id) event.transferLegSides)
+        pure EventLog_HoldingsChangeResult
+
+-- CIP-112 records issuance as an incoming transfer from its special mint account.
+shareMintEvent : Share -> ContractId Share -> EventLog_HoldingsChange
+shareMintEvent Share{..} shareCid = EventLog_HoldingsChange with
+  admin = manager
+  account = shareAccount depositor
+  inputHoldingCids = []
+  outputHoldingCids = [toInterfaceContractId @Holding shareCid]
+  transferLegSides = [TransferLegSide with
+    transferLegId = "vault-share-mint"
+    side = ReceiverSide
+    otherside = Account with owner = None; provider = None; id = "cip-112/mint"
+    amount = shares
+    instrumentId = (shareInstrumentId manager vaultId).id
+    meta = emptyMetadata]
+  observers = [depositor]
+  extraArgs = ExtraArgs with
+    context = emptyChoiceContext
+    meta = Metadata with
+      values = TextMap.fromList [("splice.lfdecentralizedtrust.org/reason", "vault-share-mint")]

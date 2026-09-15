@@ -1,0 +1,38 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module AccessAttestation where
+
+import DA.List (dedup)
+
+import IAccessAttestation
+
+-- The manager records successful onboarding; supporting evidence stays off-ledger.
+template AccessAttestation
+  with
+    manager : Party
+    depositor : Party
+    vaultIds : [Text]
+    evidenceHash : Optional Text
+  where
+    signatory manager
+    observer depositor
+    ensure
+      evidenceHash /= Some ""
+        && all (/= "") vaultIds
+        && length vaultIds == length (dedup vaultIds)
+
+    interface instance IAccessAttestation for AccessAttestation where
+      view = AccessAttestationInfo with manager, depositor, vaultIds
+
+    choice Revoke : ()
+      controller manager
+      do return ()
+
+-- Recheck approval at request creation and consumption so revocation affects pending deposits.
+validateAttestation : ContractId IAccessAttestation -> Party -> Party -> Text -> Update ()
+validateAttestation attestationCid manager depositor vaultId = do
+  approval <- view <$> fetch attestationCid
+  assertMsg "attestation manager does not match vault" (approval.manager == manager)
+  assertMsg "attestation depositor does not match request" (approval.depositor == depositor)
+  assertMsg "vault is outside attestation scope" (vaultId `elem` approval.vaultIds)

@@ -1,0 +1,137 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module TradeOffer where
+
+import DA.List (dedup)
+import DA.Optional (fromSomeNote)
+import DA.Foldable (forA_)
+import DA.TextMap qualified as TextMap
+import ITradeOffer
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.AllocationV2
+import Splice.Api.Token.AllocationInstructionV2
+import Splice.Api.Token.MetadataV1
+
+data AssetFactories = AssetFactories with
+  allocationFactoryCid : ContractId AllocationFactory
+  settlementFactoryCid : ContractId SettlementFactory
+    deriving (Eq, Show)
+
+-- The counterparty commits to exact terms and factory contracts. Its holdings
+-- remain spendable until execution, so an unavailable holding invalidates the trade.
+template TradeOffer
+  with
+    vaultId : Text
+    manager : Party
+    counterparty : Party
+    counterpartyAccount : Account
+    terms : TradeTerms
+    expiresAt : Time
+    counterpartyHoldingCids : [ContractId Holding]
+    cashFactories : AssetFactories
+    assetFactories : AssetFactories
+  where
+    signatory counterparty
+    observer manager
+    ensure vaultId /= "" && counterparty /= manager
+      && counterpartyAccount.owner == Some counterparty
+      && terms.asset /= terms.currency
+      && terms.quantity > 0.0 && terms.unitPrice > 0.0 && tradeAmount terms > 0.0
+      && not (null counterpartyHoldingCids)
+
+    interface instance ITradeOffer for TradeOffer where
+      view = TradeOfferInfo with vaultId, manager, terms, expiresAt
+
+      -- The private handler calls this public settlement under the signed offer.
+      executeTrade self vaultCid treasuryHoldingCids extraArgs = do
+        vault <- view <$> fetch vaultCid
+        assertMsg "offer belongs to another vault" (vault.manager == manager && vault.vaultId == vaultId)
+        assertMsg "offer currency differs from vault currency" (terms.currency == vault.acceptedInstrument)
+        now <- getTime
+        assertMsg "trade offer has expired" (now < expiresAt)
+        let settlement = SettlementInfo with
+              executors = [manager]
+              id = "vault-trade"
+              cid = Some (coerceContractId self)
+              meta = emptyMetadata
+            cashAmount = tradeAmount terms
+            (cashSender, cashReceiver, cashHoldings) =
+              case terms.direction of
+                BuyAsset -> (vault.treasury, counterpartyAccount, treasuryHoldingCids)
+                SellAsset -> (counterpartyAccount, vault.treasury, counterpartyHoldingCids)
+            assetHoldings = case terms.direction of
+              BuyAsset -> counterpartyHoldingCids
+              SellAsset -> treasuryHoldingCids
+        -- Each registry settles one instrument. Both calls belong to this single
+        -- transaction, so failure of the asset delivery also reverts the cash payment.
+        settleTransfer settlement expiresAt cashFactories terms.currency cashSender cashReceiver
+          cashAmount cashHoldings extraArgs
+        settleTransfer settlement expiresAt assetFactories terms.asset cashReceiver cashSender
+          terms.quantity assetHoldings extraArgs
+        pure TradeSettlement with quantity = terms.quantity; cashAmount
+
+    choice Cancel : ()
+      controller counterparty
+      do pure ()
+
+    choice Reject : ()
+      controller manager
+      do pure ()
+
+-- Explicit receiving allocations carry each recipient's consent across the
+-- registry boundary. Change stays in the sender's original account.
+settleTransfer : SettlementInfo -> Time -> AssetFactories -> InstrumentId
+  -> Account -> Account -> Decimal -> [ContractId Holding] -> ExtraArgs -> Update ()
+settleTransfer settlement deadline factories instrument sender receiver amount holdingCids extraArgs = do
+  let senderOwner = fromSomeNote "trade sender requires an owner" sender.owner
+  holdings <- forA holdingCids (\cid -> view <$> fetch cid)
+  assertMsg "trade funding must be unique and sufficient"
+    (length holdingCids == length (dedup holdingCids) && sum (map (.amount) holdings) >= amount)
+  assertMsg "trade requires unlocked holdings from the agreed account and instrument"
+    (all (\holding -> holding.account == sender && holding.instrumentId == instrument && holding.lock == None) holdings)
+  allocationFactory <- exercise factories.allocationFactoryCid AllocationFactory_PublicFetch with actors = [senderOwner]
+  settlementFactory <- exercise factories.settlementFactoryCid SettlementFactory_PublicFetch with actors = settlement.executors
+  assertMsg "trade factories belong to another issuer"
+    (allocationFactory.admin == instrument.admin && settlementFactory.admin == instrument.admin)
+  funded <- allocateForTrade settlement deadline factories instrument sender amount holdingCids extraArgs
+  receiving <- allocateForTrade settlement deadline factories instrument receiver 0.0 [] extraArgs
+  let leg = TransferLeg with
+        transferLegId = "trade-transfer"
+        sender, receiver, amount
+        instrumentId = instrument.id
+        meta = emptyMetadata
+      side direction other = TransferLegSide with
+        transferLegId = leg.transferLegId
+        side = direction; otherside = other; amount; instrumentId = instrument.id; meta = emptyMetadata
+      finalized cid sides = FinalizedAllocation with
+        allocationCid = cid; extraTransferLegSides = sides; nextIterationFunding = None
+  result <- exercise factories.settlementFactoryCid SettlementFactory_SettleBatch with
+    settlement
+    transferLegs = [leg]
+    allocations = [finalized funded [side SenderSide receiver], finalized receiving [side ReceiverSide sender]]
+    actors = settlement.executors
+    extraArgs
+  assertMsg "trade settlement returned unexpected allocation results" (length result.allocationSettleResults == 2)
+  forA_ result.allocationSettleResults $ \allocationResult -> case allocationResult.output of
+    AllocationResult_Settled None -> pure ()
+    _ -> fail "trade settlement must complete both allocations"
+
+allocateForTrade : SettlementInfo -> Time -> AssetFactories -> InstrumentId
+  -> Account -> Decimal -> [ContractId Holding] -> ExtraArgs -> Update (ContractId Allocation)
+allocateForTrade settlement deadline factories instrument account amount holdingCids extraArgs = do
+  now <- getTime
+  result <- exercise factories.allocationFactoryCid AllocationFactory_Allocate with
+    settlement
+    allocation = AllocationSpecification with
+      admin = instrument.admin; authorizer = account
+      transferLegSides = []; settlementDeadline = Some deadline
+      nextIterationFunding = Some (TextMap.fromList [(instrument.id, amount) | amount > 0.0])
+      committed = False; meta = emptyMetadata
+    requestedAt = now
+    inputHoldingCids = holdingCids
+    actors = [fromSomeNote "trade account requires an owner" account.owner]
+    extraArgs
+  case result.output of
+    AllocationInstructionResult_Completed cid -> pure cid
+    _ -> fail "trade requires a completed allocation"

@@ -11,15 +11,16 @@ PATTERN_TEST_PACKAGES := $(patsubst %/daml.yaml,%,$(wildcard patterns/*/test/dam
 PATTERNS := $(notdir $(patsubst %/test,%,$(PATTERN_TEST_PACKAGES)))
 
 .PHONY: clean build test build-patterns test-patterns sandbox-smoke sandbox-public-private \
+	build-vault-example test-vault-example \
 	$(addprefix build-,$(PATTERNS)) $(addprefix test-,$(PATTERNS))
 
 # Remove local Daml build artifacts.
 clean:
 	@find . -name .daml -type d -prune -exec rm -rf {} +
 
-build: build-patterns
+build: build-patterns build-vault-example
 
-test: test-patterns
+test: test-patterns test-vault-example
 
 build-patterns: $(addprefix build-,$(PATTERNS))
 
@@ -38,6 +39,12 @@ test-patterns: build-patterns
 		echo "== $$p"; \
 		dpm test --package-root $$p --all --show-coverage || exit 1; \
 	done
+
+build-vault-example:
+	@cd vault-example && dpm build --all
+
+test-vault-example: build-vault-example
+	@dpm test --package-root vault-example/test --all --show-coverage
 
 # Two-participant demo from the public-private-split pattern.
 sandbox-smoke: sandbox-public-private

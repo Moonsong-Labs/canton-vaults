@@ -1,0 +1,39 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module TradeHandler where
+
+import ITradeHandler
+import ITradeOffer
+import Splice.Api.Token.HoldingV2 (InstrumentId)
+
+template TradeHandler
+  with
+    vaultId : Text
+    manager : Party
+    allowedAssets : [InstrumentId]
+    maxTradeAmount : Decimal
+  where
+    signatory manager
+    ensure vaultId /= "" && maxTradeAmount > 0.0
+
+    interface instance ITradeHandler for TradeHandler where
+      view = TradeHandlerInfo with vaultId, manager
+
+      -- Offer validation and investment policy stay private. Only the final
+      -- exercise enters the counterparty-visible settlement subtree.
+      handleTrade vaultCid direction offerCid treasuryHoldingCids extraArgs = do
+        vault <- view <$> fetch vaultCid
+        assertMsg "trade handler belongs to another vault" (vault.manager == manager && vault.vaultId == vaultId)
+        offer <- view <$> fetch offerCid
+        let terms = offer.terms
+        assertMsg "offer belongs to another vault" (offer.manager == manager && offer.vaultId == vaultId)
+        assertMsg "offer has the wrong trade direction" (terms.direction == direction)
+        assertMsg "offer currency differs from vault currency" (terms.currency == vault.acceptedInstrument)
+        now <- getTime
+        assertMsg "trade offer has expired" (now < offer.expiresAt)
+        assertMsg "asset is outside the vault investment policy" (terms.asset `elem` allowedAssets)
+        assertMsg "trade must have positive quantity and price"
+          (terms.quantity > 0.0 && terms.unitPrice > 0.0 && tradeAmount terms > 0.0)
+        assertMsg "trade exceeds the private limit" (tradeAmount terms <= maxTradeAmount)
+        exercise offerCid ExecuteTrade with vaultCid, treasuryHoldingCids, extraArgs

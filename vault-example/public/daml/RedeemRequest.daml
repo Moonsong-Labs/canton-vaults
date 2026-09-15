@@ -1,0 +1,200 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module RedeemRequest where
+
+import DA.List (dedup)
+import DA.Foldable (forA_)
+import DA.TextMap qualified as TextMap
+import Splice.Api.Token.AllocationInstructionV2
+import Splice.Api.Token.AllocationV2
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.MetadataV1
+import IRedeemHandler
+import IVault
+import ShareEvents
+
+data RedeemSettlement = RedeemSettlement with
+  redeemedShares : Decimal
+  amount : Decimal
+  fee : Decimal
+  receivedAmount : Decimal
+  sharePrice : Decimal
+    deriving (Eq, Show)
+
+-- The holder's signed request identifies the shares reserved for redemption.
+-- Approval and settlement are handled separately by the manager.
+template RedeemRequest
+  with
+    vaultId : Text
+    manager : Party
+    depositor : Party
+    shares : Decimal
+    allocationCid : ContractId Allocation
+    settlement : SettlementInfo
+  where
+    signatory depositor
+    observer manager
+    ensure vaultId /= "" && shares > 0.0
+      && settlement.executors == [manager] && settlement.id == "vault-redeem"
+      && settlement.cid /= None
+
+    -- The signed request supplies the holder's authority to receive the payout.
+    -- Private approval runs in Vault.HandleRedeem before entering this subtree.
+    choice ConsumeRedeem : RedeemSettlement
+      with
+        vaultCid : ContractId IVault
+        quote : RedeemQuote
+        treasuryHoldingCids : [ContractId Holding]
+        allocationFactoryCid : ContractId AllocationFactory
+        settlementFactoryCid : ContractId SettlementFactory
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        vault <- view <$> fetch vaultCid
+        assertMsg "vault does not match redeem request" (vault.manager == manager && vault.vaultId == vaultId)
+        assertMsg "redeem quote must leave a positive payout"
+          (quote.amount > 0.0 && quote.sharePrice > 0.0 && quote.fee >= 0.0 && quote.fee < quote.amount)
+        validateRedeemFunding this
+        holdings <- forA treasuryHoldingCids (\cid -> view <$> fetch cid)
+        assertMsg "treasury holdings must be unique and cover the payout"
+          (length treasuryHoldingCids == length (dedup treasuryHoldingCids)
+            && sum (map (.amount) holdings) >= quote.amount)
+        assertMsg "payout requires unlocked holdings from this vault's treasury"
+          (all (\holding -> holding.account == vault.treasury
+            && holding.instrumentId == vault.acceptedInstrument && holding.lock == None) holdings)
+        allocationFactory <- exercise allocationFactoryCid AllocationFactory_PublicFetch with actors = [manager]
+        settlementFactory <- exercise settlementFactoryCid SettlementFactory_PublicFetch with actors = [manager]
+        assertMsg "asset factories must match the vault instrument admin"
+          (allocationFactory.admin == vault.acceptedInstrument.admin && settlementFactory.admin == vault.acceptedInstrument.admin)
+
+        now <- getTime
+        funded <- exercise allocationFactoryCid AllocationFactory_Allocate with
+          settlement
+          allocation = payoutAllocation vault.acceptedInstrument.admin vault.treasury
+            (TextMap.fromList [(vault.acceptedInstrument.id, quote.amount)])
+          inputHoldingCids = treasuryHoldingCids
+          requestedAt = now
+          actors = [manager]
+          extraArgs
+        fundingCid <- completedAllocation funded
+        -- Receiving approval is created under the request, where the depositor's
+        -- signature authorizes the registry to create holdings in their account.
+        receiving <- exercise allocationFactoryCid AllocationFactory_Allocate with
+          settlement
+          allocation = payoutAllocation vault.acceptedInstrument.admin (shareAccount depositor) TextMap.empty
+          inputHoldingCids = []
+          requestedAt = now
+          actors = [depositor]
+          extraArgs
+        receivingCid <- completedAllocation receiving
+        let receivedAmount = quote.amount - quote.fee
+            payout = TransferLeg with
+              transferLegId = "vault-redeem-payout"
+              sender = vault.treasury
+              receiver = shareAccount depositor
+              amount = receivedAmount
+              instrumentId = vault.acceptedInstrument.id
+              meta = emptyMetadata
+            feeLeg = payout with
+              transferLegId = "vault-redeem-fee"; receiver = vault.feeTreasury; amount = quote.fee
+            legs = [payout] <> [feeLeg | quote.fee > 0.0]
+        -- All three accounts explicitly approve their respective transfer legs.
+        feeAllocations <- if quote.fee > 0.0 then do
+          feeResult <- exercise allocationFactoryCid AllocationFactory_Allocate with
+            settlement
+            allocation = payoutAllocation vault.acceptedInstrument.admin vault.feeTreasury TextMap.empty
+            inputHoldingCids = []
+            requestedAt = now
+            actors = [manager]
+            extraArgs
+          feeCid <- completedAllocation feeResult
+          pure [finalize feeCid [receivingSide feeLeg]]
+        else pure []
+        result <- exercise settlementFactoryCid SettlementFactory_SettleBatch with
+          settlement
+          transferLegs = legs
+          allocations = [finalize fundingCid (map spendingSide legs), finalize receivingCid [receivingSide payout]] <> feeAllocations
+          actors = [manager]
+          extraArgs
+        assertMsg "redeem payout returned unexpected results"
+          (length result.allocationSettleResults == 2 + length feeAllocations)
+        forA_ result.allocationSettleResults requireSettled
+        -- Burning the reserved shares and paying the asset share the same transaction.
+        burned <- exercise allocationCid Allocation_Settle with
+          actors = [manager]; extraTransferLegSides = []; nextIterationFunding = None; extraArgs
+        requireSettled burned
+        pure RedeemSettlement with
+          redeemedShares = shares
+          amount = quote.amount
+          fee = quote.fee
+          sharePrice = quote.sharePrice
+          receivedAmount
+
+    choice CancelRedeem : AllocationResult
+      with extraArgs : ExtraArgs
+      controller depositor
+      do exercise allocationCid Allocation_Withdraw with actors = [depositor]; extraArgs
+
+    choice RejectRedeem : AllocationResult
+      with extraArgs : ExtraArgs
+      controller manager
+      do exercise allocationCid Allocation_Cancel with actors = [manager]; extraArgs
+
+-- Bind the request to its reserved share lot and fixed burn authorization.
+validateRedeemFunding : RedeemRequest -> Update ()
+validateRedeemFunding RedeemRequest{..} = do
+  allocation <- view <$> fetch allocationCid
+  assertMsg "share allocation does not match redeem request"
+    (allocation.settlement == settlement && allocation.allocation.admin == manager
+      && allocation.allocation.authorizer == shareAccount depositor
+      && allocation.allocation.transferLegSides == [redeemBurnSide manager vaultId shares]
+      && allocation.allocation.nextIterationFunding == None && not allocation.allocation.committed)
+  cid <- case allocation.holdingCids of
+    [cid] -> pure cid
+    _ -> fail "redeem requires one reserved share lot"
+  holding <- view <$> fetch cid
+  assertMsg "reserved holding does not match redeem request"
+    (holding.account == shareAccount depositor && holding.instrumentId == shareInstrumentId manager vaultId
+      && holding.amount == shares && holding.lock /= None)
+
+redeemBurnSide : Party -> Text -> Decimal -> TransferLegSide
+redeemBurnSide manager vaultId shares = TransferLegSide with
+  transferLegId = "vault-share-burn"
+  side = SenderSide
+  otherside = shareBurnAccount
+  amount = shares
+  instrumentId = (shareInstrumentId manager vaultId).id
+  meta = emptyMetadata
+
+-- Empty funding provides receiving approval; positive funding reserves the payout.
+payoutAllocation : Party -> Account -> TextMap.TextMap Decimal -> AllocationSpecification
+payoutAllocation admin authorizer funding = AllocationSpecification with
+  admin, authorizer
+  transferLegSides = []
+  settlementDeadline = None
+  nextIterationFunding = Some funding
+  committed = False
+  meta = emptyMetadata
+
+completedAllocation : AllocationInstructionResult -> Update (ContractId Allocation)
+completedAllocation result = case result.output of
+  AllocationInstructionResult_Completed cid -> pure cid
+  _ -> fail "redeem requires a completed asset allocation"
+
+finalize : ContractId Allocation -> [TransferLegSide] -> FinalizedAllocation
+finalize allocationCid extraTransferLegSides = FinalizedAllocation with
+  allocationCid, extraTransferLegSides; nextIterationFunding = None
+
+spendingSide : TransferLeg -> TransferLegSide
+spendingSide TransferLeg{..} = TransferLegSide with
+  transferLegId, amount, instrumentId, meta; side = SenderSide; otherside = receiver
+
+receivingSide : TransferLeg -> TransferLegSide
+receivingSide TransferLeg{..} = TransferLegSide with
+  transferLegId, amount, instrumentId, meta; side = ReceiverSide; otherside = sender
+
+requireSettled : AllocationResult -> Update ()
+requireSettled result = case result.output of
+  AllocationResult_Settled None -> pure ()
+  _ -> fail "redeem settlement did not complete"

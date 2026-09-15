@@ -24,9 +24,14 @@ with the problem, parties, contracts, and invariants.
 | [`public-private-split`](patterns/03-public-private-split/README.md) | A **public-private DAR file split** for logic that must stay private or changes often. Three layers with one dependency direction: interface, public, and private. Counterparties vet the interface and public packages; the manager vets all three. Private changes never touch the public layer. Comes with a two-participant sandbox (`make sandbox-public-private`). |
 
 Patterns are **not audited** and intended as design references only. Each one
-showcases a single design solution on its own. A complete example vault that
-composes these patterns, including redemption and pricing, is planned to be
-added to the repository.
+showcases a single design solution on its own.
+
+## Vault example
+
+[`vault-example/`](vault-example/README.md) is a self-contained vault example
+based on VaultKit. It demonstrates deposit and redeem flows across interface,
+public, and private packages, with a separate test package and a two-participant
+sandbox showing the interaction between the depositor and the manager.
 
 ## Build and test
 
@@ -47,7 +52,13 @@ make test-03-public-private-split
 
 Each build includes the selected pattern's production packages. Each test
 command builds those packages first and runs the selected pattern's tests.
-Patterns are self-contained. `make build` and `make test` still cover all patterns.
+Patterns are self-contained. `make build` and `make test` cover all patterns
+and the vault example. To run only the example:
+
+```sh
+make build-vault-example
+make test-vault-example
+```
 
 `make sandbox-public-private` runs the two-participant demo from the
 public-private-split pattern. CI runs the same check with `make sandbox-smoke`.

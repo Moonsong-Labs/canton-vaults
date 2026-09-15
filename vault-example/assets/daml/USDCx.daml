@@ -1,0 +1,309 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module USDCx where
+
+-- Demo asset shared by tests and sandbox deployments.
+-- Uses the token-standard interfaces; cancellation and withdrawal are unsupported.
+
+import DA.List (dedup, sort)
+import DA.Map qualified as Map
+import DA.Optional (fromSomeNote)
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.AllocationInstructionV2
+import Splice.Api.Token.AllocationV2
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.MetadataV1
+
+accountOwner : Account -> Party
+accountOwner account = fromSomeNote "demo holdings require an account owner" account.owner
+
+fundingFor : Text -> Optional (TextMap.TextMap Decimal) -> Decimal
+fundingFor instrumentId funding = case funding of
+  Some amounts -> case TextMap.lookup instrumentId amounts of
+    Some amount -> amount
+    None -> 0.0
+  None -> 0.0
+
+senderSide : TransferLeg -> TransferLegSide
+senderSide TransferLeg{..} = TransferLegSide with
+  transferLegId
+  side = SenderSide
+  otherside = receiver
+  amount
+  instrumentId
+  meta
+
+totalAmount : [TransferLegSide] -> Decimal
+totalAmount = foldl (\total side -> total + side.amount) 0.0
+
+template USDCxHolding
+  with
+    admin : Party
+    account : Account
+    instrumentId : InstrumentId
+    amount : Decimal
+    lock : Optional Lock
+    observers : [Party]
+  where
+    signatory admin, accountOwner account
+    observer observers
+    ensure amount > 0.0 && account.owner /= None
+
+    interface instance Holding for USDCxHolding where
+      view = HoldingView with
+        account
+        instrumentId
+        amount
+        lock
+        meta = emptyMetadata
+
+template USDCxAllocation
+  with
+    admin : Party
+    settlement : SettlementInfo
+    allocation : AllocationSpecification
+    lockedHoldingCid : Optional (ContractId USDCxHolding)
+    createdAt : Time
+  where
+    signatory admin, accountOwner allocation.authorizer
+    observer settlement.executors
+
+    interface instance Allocation for USDCxAllocation where
+      view = AllocationView with
+        originalAllocationCid = None
+        settlement
+        allocation
+        holdingCids = [toInterfaceContractId @Holding cid | Some cid <- [lockedHoldingCid]]
+        createdAt
+        numIterations = 0
+        expiresAt = allocation.settlementDeadline
+        availableActions = Map.fromList [(AA_Settle, [dedup (admin :: settlement.executors)])]
+        meta = emptyMetadata
+
+      allocation_settleExtraObservers _arg = settlement.executors
+      allocation_cancelExtraObservers _arg = settlement.executors
+      allocation_withdrawExtraObservers _arg = settlement.executors
+
+      allocation_settleImpl self arg = do
+        assertMsg "settlement actors must match the allocation executors"
+          (sort arg.actors == sort (dedup (admin :: settlement.executors)))
+        assertMsg "demo allocation requires deferred transfer legs"
+          (allocation.transferLegSides == [])
+        assertMsg "demo allocation requires iterated funding"
+          (allocation.nextIterationFunding /= None)
+        assertMsg "settlement must complete the allocation"
+          (arg.nextIterationFunding == None)
+        now <- getTime
+        assertMsg "allocation settlement deadline has passed"
+          (optional True (now <=) allocation.settlementDeadline)
+
+        let transferLegSides = arg.extraTransferLegSides
+        assertMsg "settlement requires positive legs"
+          (not (null transferLegSides) && all (\side -> side.amount > 0.0) transferLegSides)
+        -- The registry authorizes balanced debits and credits. Each allocation
+        -- carries its own account owner's authority for the resulting holdings.
+        outputCids <- case lockedHoldingCid of
+          Some cid -> do
+            holding <- fetch cid
+            assertMsg "funded allocation must spend exactly its holding"
+              (all (\side -> side.side == SenderSide && side.instrumentId == holding.instrumentId.id) transferLegSides
+                && totalAmount transferLegSides == holding.amount)
+            archive cid
+            pure TextMap.empty
+          None -> do
+            first <- case transferLegSides of
+              side :: _ -> pure side
+              [] -> fail "receiving allocation requires transfer legs"
+            assertMsg "unfunded allocation only accepts one incoming instrument"
+              (all (\side -> side.side == ReceiverSide && side.instrumentId == first.instrumentId) transferLegSides)
+            cid <- create USDCxHolding with
+              admin
+              account = allocation.authorizer
+              instrumentId = InstrumentId with admin; id = first.instrumentId
+              amount = totalAmount transferLegSides
+              lock = None
+              observers = settlement.executors
+            pure (TextMap.fromList [(first.instrumentId, [toInterfaceContractId @Holding cid])])
+        archive self
+        pure AllocationResult with
+          output = AllocationResult_Settled with nextIterationAllocationCid = None
+          authorizerHoldingCids = outputCids
+          meta = emptyMetadata
+
+      allocation_cancelImpl _self _arg = fail "cancel is outside this demo asset's scope"
+      allocation_withdrawImpl _self _arg = fail "withdraw is outside this demo asset's scope"
+
+template USDCxRegistry
+  with
+    admin : Party
+    instrumentId : InstrumentId
+    observers : [Party]
+  where
+    signatory admin
+    observer observers
+
+    interface instance AllocationFactory for USDCxRegistry where
+      view = AllocationFactoryView with
+        admin
+        meta = emptyMetadata
+
+      allocationFactory_allocateExtraObservers arg = arg.settlement.executors
+
+      allocationFactory_allocateImpl _self arg = do
+        assertMsg "allocation actors must match the authorizer"
+          (arg.actors == [accountOwner arg.allocation.authorizer])
+        assertMsg "allocation uses an unsupported issuer"
+          (arg.allocation.admin == admin)
+        assertMsg "allocation must use deferred transfer legs"
+          (arg.allocation.transferLegSides == [])
+
+        case arg.inputHoldingCids of
+          [] -> do
+            assertMsg "receiving allocation must have empty iterated funding"
+              (arg.allocation.nextIterationFunding == Some TextMap.empty)
+            cid <- create USDCxAllocation with
+              admin
+              settlement = arg.settlement
+              allocation = arg.allocation
+              lockedHoldingCid = None
+              createdAt = arg.requestedAt
+            pure AllocationInstructionResult with
+              output = AllocationInstructionResult_Completed (toInterfaceContractId @Allocation cid)
+              authorizerChangeCids = TextMap.empty
+              meta = emptyMetadata
+          _ -> do
+            -- Accept holdings issued by this demo implementation before reserving funds.
+            inputHoldings <- forA arg.inputHoldingCids $ \cid ->
+              fetch (coerceContractId cid : ContractId USDCxHolding)
+            assertMsg "input holdings must be unique"
+              (length arg.inputHoldingCids == length (dedup arg.inputHoldingCids))
+            let holdingViews = map (view . toInterface @Holding) inputHoldings
+                grossAmount = fundingFor instrumentId.id arg.allocation.nextIterationFunding
+                inputAmount = foldl (\total holdingView -> total + holdingView.amount) 0.0 holdingViews
+            firstHoldingView <- case holdingViews of
+              [] -> fail "sender allocation requires at least one input holding"
+              holdingView :: _ -> pure holdingView
+            assertMsg "input holding belongs to a different account"
+              (all (\holdingView -> holdingView.account == arg.allocation.authorizer) holdingViews)
+            assertMsg "input holding uses an unsupported instrument"
+              (all (\holdingView -> holdingView.instrumentId == instrumentId) holdingViews)
+            assertMsg "input holding is already locked"
+              (all (\holdingView -> holdingView.lock == None) holdingViews)
+            assertMsg "allocation funding must be positive" (grossAmount > 0.0)
+            assertMsg "input holdings have insufficient funds" (inputAmount >= grossAmount)
+
+            _ <- forA arg.inputHoldingCids archive
+            lockedHoldingCid <- create USDCxHolding with
+              admin
+              account = firstHoldingView.account
+              instrumentId
+              amount = grossAmount
+              lock = Some Lock with
+                holders = admin :: arg.settlement.executors
+                expiresAt = arg.allocation.settlementDeadline
+                expiresAfter = None
+                context = Some "vault allocation"
+              observers = arg.settlement.executors
+            let changeAmount = inputAmount - grossAmount
+            changeCids <- if changeAmount > 0.0 then do
+              changeHoldingCid <- create USDCxHolding with
+                admin
+                account = firstHoldingView.account
+                instrumentId
+                amount = changeAmount
+                lock = None
+                observers = arg.settlement.executors
+              pure [toInterfaceContractId @Holding changeHoldingCid]
+            else
+              pure []
+            allocationCid <- create USDCxAllocation with
+              admin
+              settlement = arg.settlement
+              allocation = arg.allocation
+              lockedHoldingCid = Some lockedHoldingCid
+              createdAt = arg.requestedAt
+            pure AllocationInstructionResult with
+              output = AllocationInstructionResult_Completed with
+                allocationCid = toInterfaceContractId @Allocation allocationCid
+              authorizerChangeCids =
+                if null changeCids
+                then TextMap.empty
+                else TextMap.fromList [(instrumentId.id, changeCids)]
+              meta = emptyMetadata
+
+      allocationFactory_publicFetchImpl _self _arg = pure AllocationFactoryView with
+        admin
+        meta = emptyMetadata
+
+    interface instance SettlementFactory for USDCxRegistry where
+      view = SettlementFactoryView with
+        admin
+        meta = emptyMetadata
+
+      settlementFactory_settleBatchExtraObservers arg = arg.settlement.executors
+
+      settlementFactory_settleBatchImpl _self arg = do
+        assertMsg "settlement actors must match the executors"
+          (arg.actors == arg.settlement.executors)
+        let legs = arg.transferLegs
+            legIds = map (.transferLegId) legs
+        assertMsg "settlement requires unique transfer legs"
+          (not (null legs) && length legIds == length (dedup legIds))
+        assertMsg "transfer legs must use this registry's instrument"
+          (all (\leg -> leg.instrumentId == instrumentId.id && leg.amount > 0.0) legs)
+        let cids = map (.allocationCid) arg.allocations
+        assertMsg "settlement allocations must be unique" (length cids == length (dedup cids))
+        supplied <- forA arg.allocations $ \finalized -> do
+          concrete <- fetch (coerceContractId finalized.allocationCid : ContractId USDCxAllocation)
+          let allocation = view (toInterface @Allocation concrete)
+          assertMsg "allocation belongs to another settlement"
+            (allocation.settlement == arg.settlement && allocation.allocation.admin == admin)
+          assertMsg "settlement must finish the deferred allocation"
+            (null allocation.allocation.transferLegSides && finalized.nextIterationFunding == None)
+          pure (allocation.allocation.authorizer, finalized)
+
+        -- Executor-owned receiving accounts can grant their approval here.
+        -- Other recipients supply an allocation carrying their own authority.
+        now <- getTime
+        let receivingAccounts = dedup (map (.receiver) legs)
+        added <- forA (filter (\account -> account `notElem` map fst supplied) receivingAccounts) $ \account -> do
+          assertMsg "recipient must supply an allocation or authorize settlement"
+            (accountOwner account `elem` arg.actors)
+          cid <- create USDCxAllocation with
+            admin
+            settlement = arg.settlement
+            allocation = AllocationSpecification with
+              admin; authorizer = account; transferLegSides = []; settlementDeadline = None
+              nextIterationFunding = Some TextMap.empty; committed = False; meta = emptyMetadata
+            lockedHoldingCid = None
+            createdAt = now
+          pure (account, FinalizedAllocation with
+            allocationCid = toInterfaceContractId @Allocation cid
+            extraTransferLegSides = [receiverSide leg | leg <- legs, leg.receiver == account]
+            nextIterationFunding = None)
+        let allAllocations = supplied <> added
+            authorized = [(account, side) | (account, finalized) <- allAllocations, side <- finalized.extraTransferLegSides]
+            expected = concat [[(leg.sender, senderSide leg), (leg.receiver, receiverSide leg)] | leg <- legs]
+        assertMsg "allocations must authorize both sides of every transfer exactly once"
+          (sort authorized == sort expected)
+        results <- forA allAllocations $ \(_, finalized) ->
+          exercise finalized.allocationCid Allocation_Settle with
+            actors = dedup (admin :: arg.actors)
+            extraTransferLegSides = finalized.extraTransferLegSides
+            nextIterationFunding = None
+            extraArgs = arg.extraArgs
+        pure SettlementFactory_SettleBatchResult with
+          allocationSettleResults = take (length supplied) results
+          meta = emptyMetadata
+
+      settlementFactory_publicFetchImpl _self _arg = pure SettlementFactoryView with
+        admin
+        meta = emptyMetadata
+
+receiverSide : TransferLeg -> TransferLegSide
+receiverSide TransferLeg{..} = TransferLegSide with
+  transferLegId, amount, instrumentId, meta
+  side = ReceiverSide
+  otherside = sender

@@ -1,0 +1,16 @@
+sdk-version: 3.5.2
+name: vault-example-public
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+build-options:
+  - --target=2.3
+data-dependencies:
+  - ../../dependencies/token-standard/splice-api-token-holding-v2-1.0.0.dar
+  - ../../dependencies/token-standard/splice-api-token-allocation-v2-1.0.0.dar
+  - ../../dependencies/token-standard/splice-api-token-allocation-instruction-v2-1.0.0.dar
+  - ../../dependencies/token-standard/splice-api-token-metadata-v1-1.0.0.dar
+  - ../../dependencies/token-standard/splice-api-token-transfer-events-v2-1.0.0.dar
+  - ../interface/.daml/dist/vault-example-interface-0.1.0.dar

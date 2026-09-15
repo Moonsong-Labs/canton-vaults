@@ -1,0 +1,120 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module VaultAccess where
+
+import DA.List (dedup)
+import DA.TextMap qualified as TextMap
+import Splice.Api.Token.AllocationInstructionV2
+import Splice.Api.Token.AllocationV2
+import Splice.Api.Token.HoldingV2
+import Splice.Api.Token.MetadataV1
+
+import AccessAttestation (validateAttestation)
+import IAccessAttestation (IAccessAttestation)
+import IDepositHandler
+import IVaultAccess
+import DepositRequest
+import ShareRegistry (ShareRegistry)
+
+-- Consumers must fetch the attestation and validate its parties and vault scope.
+template VaultAccess
+  with
+    vaultId : Text
+    manager : Party
+    depositor : Party
+    attestationCid : ContractId IAccessAttestation
+    acceptedInstrument : InstrumentId
+    treasury : Account
+    feeTreasury : Account
+  where
+    signatory manager
+    observer depositor
+    ensure vaultId /= "" && acceptedInstrument.id /= "" && treasury.owner == Some manager
+      && feeTreasury.owner == Some manager && feeTreasury /= treasury
+
+    interface instance IVaultAccess for VaultAccess where
+      view = VaultAccessInfo with vaultId, manager, depositor, attestationCid, acceptedInstrument, treasury, feeTreasury
+
+    nonconsuming choice Deposit : ContractId DepositRequest
+      with
+        inputHoldingCids : [ContractId Holding]
+        amount : Decimal
+        allocationFactoryCid : ContractId AllocationFactory
+        extraArgs : ExtraArgs
+      controller depositor
+      do
+        validateAttestation attestationCid manager depositor vaultId
+        holdings <- forA inputHoldingCids (\cid -> view <$> fetch cid)
+        account <- case holdings of
+          first :: _ -> pure first.account
+          [] -> fail "deposit requires at least one holding"
+        assertMsg "deposit holdings must be unique"
+          (length inputHoldingCids == length (dedup inputHoldingCids))
+        assertMsg "deposit holdings must belong to the depositor"
+          (account.owner == Some depositor && all (\holding -> holding.account == account) holdings)
+        assertMsg "deposit holdings must be unlocked" (all (\holding -> holding.lock == None) holdings)
+        assertMsg "deposit holdings must use the accepted instrument"
+          (all (\holding -> holding.instrumentId == acceptedInstrument) holdings)
+        assertMsg "deposit amounts must be positive"
+          (amount > 0.0 && all (\holding -> holding.amount > 0.0) holdings)
+        assertMsg "holdings do not cover the deposit" (sum (map (.amount) holdings) >= amount)
+        factory <- exercise allocationFactoryCid AllocationFactory_PublicFetch with actors = [depositor]
+        assertMsg "allocation factory belongs to another instrument admin"
+          (factory.admin == acceptedInstrument.admin)
+
+        let settlement = SettlementInfo with
+              executors = [manager]
+              id = "vault-deposit"
+              cid = Some (coerceContractId self)
+              meta = emptyMetadata
+        now <- getTime
+        -- Prefunding reserves the amount while the manager determines the share price.
+        result <- exercise allocationFactoryCid AllocationFactory_Allocate with
+          settlement
+          allocation = AllocationSpecification with
+            admin = acceptedInstrument.admin
+            authorizer = account
+            transferLegSides = []
+            settlementDeadline = None
+            nextIterationFunding = Some (TextMap.fromList [(acceptedInstrument.id, amount)])
+            committed = False
+            meta = emptyMetadata
+          requestedAt = now
+          inputHoldingCids
+          extraArgs
+          actors = [depositor]
+        allocationCid <- case result.output of
+          AllocationInstructionResult_Completed cid -> pure cid
+          _ -> fail "deposit requires a completed allocation"
+        create DepositRequest with
+          vaultId, manager, depositor, amount, allocationCid, settlement
+          instrumentId = acceptedInstrument
+          vaultAccessCid = toInterfaceContractId @IVaultAccess self
+
+    -- The depositor observes the permission, while this manager-controlled
+    -- nonconsuming exercise keeps valuation outside the public settlement subtree.
+    nonconsuming choice HandleDeposit : DepositSettlement
+      with
+        requestCid : ContractId DepositRequest
+        handlerCid : ContractId IDepositHandler
+        settlementFactoryCid : ContractId SettlementFactory
+        shareRegistryCid : ContractId ShareRegistry
+        extraArgs : ExtraArgs
+      controller manager
+      do
+        request <- fetch requestCid
+        assertMsg "request belongs to another access"
+          (request.vaultAccessCid == toInterfaceContractId @IVaultAccess self
+            && request.manager == manager && request.depositor == depositor
+            && request.vaultId == vaultId && request.instrumentId == acceptedInstrument)
+        validateAttestation attestationCid manager depositor vaultId
+        handler <- fetch handlerCid
+        assertMsg "handler belongs to another vault"
+          ((view handler).manager == manager && (view handler).vaultId == vaultId)
+        quote <- handleDeposit handler acceptedInstrument request.amount
+        exercise requestCid Consume with quote, settlementFactoryCid, shareRegistryCid, extraArgs
+
+    choice Revoke : ()
+      controller manager
+      do return ()

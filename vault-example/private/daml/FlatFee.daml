@@ -1,0 +1,16 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module FlatFee where
+
+import IFee
+
+-- One USDCx, reusable by deposit and redeem handlers.
+template FlatFee
+  with manager : Party
+  where
+    signatory manager
+
+    interface instance IFee for FlatFee where
+      view = FeeInfo with manager
+      calculateFee _ = 1.0

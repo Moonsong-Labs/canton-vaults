@@ -1,0 +1,23 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module IFee where
+
+data FeeInfo = FeeInfo with
+  manager : Party
+    deriving (Eq, Show)
+
+-- Amounts and fees use the vault's accepted asset, for both deposit and redeem.
+interface IFee where
+  viewtype FeeInfo
+
+  calculateFee : Decimal -> Decimal
+
+  nonconsuming choice CalculateFee : Decimal
+    with amount : Decimal
+    controller (view this).manager
+    do
+      assertMsg "amount must be positive" (amount > 0.0)
+      let fee = calculateFee this amount
+      assertMsg "fee must leave a positive net amount" (fee >= 0.0 && fee < amount)
+      pure fee
