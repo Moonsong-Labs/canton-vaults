@@ -42,9 +42,9 @@ vaultFlow = script do
   -- Setup: give vault capital and fees distinct accounts.
   let vaultId = "investment-vault"
       currency = InstrumentId with admin = cashIssuer; id = "USDCx"
-      sol = Asset.assetInstrumentId assetIssuer Asset.SOL
-      btc = Asset.assetInstrumentId assetIssuer Asset.BTC
-      eth = Asset.assetInstrumentId assetIssuer Asset.ETH
+      treasuryFund = Asset.assetInstrumentId assetIssuer Asset.TREASURY_FUND
+      creditFund = Asset.assetInstrumentId assetIssuer Asset.CREDIT_FUND
+      propertyFund = Asset.assetInstrumentId assetIssuer Asset.PROPERTY_FUND
       treasury = (basicAccount manager) with id = vaultId
       feeTreasury = treasury with id = "fees"
       counterpartyAccount = basicAccount counterparty
@@ -111,140 +111,143 @@ vaultFlow = script do
   assertValuation manager vaultId 1000.0 1000.0
   -- ------------------------------------------------------------
 
-  -- Investment: Build the Basket
-  -- Invest 300 in SOL, 390 in BTC and 250 in ETH; keep 60 USDCx liquid.
+  -- Investment: Build the Portfolio
+  -- Invest 400 in treasury fund units, 300 in credit fund units and 200 in
+  -- property fund units; keep 100 USDCx liquid.
 
-  let initialSolPrice = 100.0
-      initialBtcPrice = 78000.0
-      initialEthPrice = 2500.0
+  let initialTreasuryPrice = 100.0
+      initialCreditPrice = 50.0
+      initialPropertyPrice = 200.0
 
   -- Setup: allow the three instruments through the same private handler.
   investmentHandlerCid <- submit manager $ createCmd TradeHandler with
-    vaultId; manager; allowedAssets = [sol, btc, eth]; maxTradeAmount = 1000.0
+    vaultId; manager; allowedAssets = [treasuryFund, creditFund, propertyFund]; maxTradeAmount = 1000.0
 
-  -- Buy SOL: prepare the seller's inventory and offer, then pay 300 USDCx from treasury.
-  solOffer <- prepareBuyOffer manager counterparty vaultId cashRegistry sol 3.0 initialSolPrice
-  solOfferCid <- submit counterparty $ createCmd solOffer
-  solFunding <- queryFilter @Cash.USDCxHolding manager (\h -> h.account == treasury)
+  -- Buy treasury fund units: prepare the seller's inventory and offer, then pay 400 USDCx from treasury.
+  treasuryOffer <- prepareBuyOffer manager counterparty vaultId cashRegistry treasuryFund 4.0 initialTreasuryPrice
+  treasuryOfferCid <- submit counterparty $ createCmd treasuryOffer
+  treasuryFunding <- queryFilter @Cash.USDCxHolding manager (\h -> h.account == treasury)
   _ <- submit manager $ exerciseCmd vaultCid Buy with
-    offerCid = toInterfaceContractId @ITradeOffer solOfferCid
+    offerCid = toInterfaceContractId @ITradeOffer treasuryOfferCid
     handlerCid = toInterfaceContractId @ITradeHandler investmentHandlerCid
-    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- solFunding]
+    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- treasuryFunding]
     extraArgs = emptyExtraArgs
 
   -- Sanity check: the purchased instrument is unlocked and the cash payment is exact.
-  None <- queryContractId manager solOfferCid
-  assertAssetBalance manager treasury sol 3.0
-  assertCashBalance manager treasury 700.0
+  None <- queryContractId manager treasuryOfferCid
+  assertAssetBalance manager treasury treasuryFund 4.0
+  assertCashBalance manager treasury 600.0
 
-  -- Buy BTC: prepare the seller's inventory and offer, then pay 390 USDCx from treasury.
-  btcOffer <- prepareBuyOffer manager counterparty vaultId cashRegistry btc 0.005 initialBtcPrice
-  btcOfferCid <- submit counterparty $ createCmd btcOffer
-  btcFunding <- queryFilter @Cash.USDCxHolding manager (\h -> h.account == treasury)
+  -- Buy credit fund units: prepare the seller's inventory and offer, then pay 300 USDCx from treasury.
+  creditOffer <- prepareBuyOffer manager counterparty vaultId cashRegistry creditFund 6.0 initialCreditPrice
+  creditOfferCid <- submit counterparty $ createCmd creditOffer
+  creditFunding <- queryFilter @Cash.USDCxHolding manager (\h -> h.account == treasury)
   _ <- submit manager $ exerciseCmd vaultCid Buy with
-    offerCid = toInterfaceContractId @ITradeOffer btcOfferCid
+    offerCid = toInterfaceContractId @ITradeOffer creditOfferCid
     handlerCid = toInterfaceContractId @ITradeHandler investmentHandlerCid
-    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- btcFunding]
+    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- creditFunding]
     extraArgs = emptyExtraArgs
 
   -- Sanity check: the purchased instrument is unlocked and the cash payment is exact.
-  None <- queryContractId manager btcOfferCid
-  assertAssetBalance manager treasury btc 0.005
-  assertCashBalance manager treasury 310.0
+  None <- queryContractId manager creditOfferCid
+  assertAssetBalance manager treasury creditFund 6.0
+  assertCashBalance manager treasury 300.0
 
-  -- Buy ETH: prepare the seller's inventory and offer, then pay 250 USDCx from treasury.
-  ethOffer <- prepareBuyOffer manager counterparty vaultId cashRegistry eth 0.1 initialEthPrice
-  ethOfferCid <- submit counterparty $ createCmd ethOffer
-  ethFunding <- queryFilter @Cash.USDCxHolding manager (\h -> h.account == treasury)
+  -- Buy property fund units: prepare the seller's inventory and offer, then pay 200 USDCx from treasury.
+  propertyOffer <- prepareBuyOffer manager counterparty vaultId cashRegistry propertyFund 1.0 initialPropertyPrice
+  propertyOfferCid <- submit counterparty $ createCmd propertyOffer
+  propertyFunding <- queryFilter @Cash.USDCxHolding manager (\h -> h.account == treasury)
   _ <- submit manager $ exerciseCmd vaultCid Buy with
-    offerCid = toInterfaceContractId @ITradeOffer ethOfferCid
+    offerCid = toInterfaceContractId @ITradeOffer propertyOfferCid
     handlerCid = toInterfaceContractId @ITradeHandler investmentHandlerCid
-    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- ethFunding]
+    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- propertyFunding]
     extraArgs = emptyExtraArgs
 
   -- Sanity check: the purchased instrument is unlocked and the cash payment is exact.
-  None <- queryContractId manager ethOfferCid
-  assertAssetBalance manager treasury eth 0.1
-  assertCashBalance manager treasury 60.0
+  None <- queryContractId manager propertyOfferCid
+  assertAssetBalance manager treasury propertyFund 1.0
+  assertCashBalance manager treasury 100.0
 
-  -- Sanity check: all three assets coexist, with 940 USDCx paid to the counterparty.
-  assertAssetBalance manager treasury sol 3.0
-  assertAssetBalance manager treasury btc 0.005
-  assertAssetBalance manager treasury eth 0.1
-  assertCashBalance counterparty counterpartyAccount 940.0
+  -- Sanity check: all three positions coexist, with 900 USDCx paid to the counterparty.
+  assertAssetBalance manager treasury treasuryFund 4.0
+  assertAssetBalance manager treasury creditFund 6.0
+  assertAssetBalance manager treasury propertyFund 1.0
+  assertCashBalance counterparty counterpartyAccount 900.0
   assertValuation manager vaultId 1000.0 1000.0
   -- ------------------------------------------------------------
 
   -- Manual Valuation
-  -- Revalue SOL at 200, BTC at 80,000 and ETH at 3,400 USDCx for a NAV of 1,400.
-  -- This example deliberately uses a manual snapshot in place of an oracle.
+  -- Revalue treasury units at 101, credit units at 52 and property units at 220
+  -- USDCx for a NAV of 1,036. This example deliberately uses a manual snapshot
+  -- in place of an oracle.
 
-  let updatedSolPrice = 200.0
-      updatedBtcPrice = 80000.0
-      updatedEthPrice = 3400.0
+  let updatedTreasuryPrice = 101.0
+      updatedCreditPrice = 52.0
+      updatedPropertyPrice = 220.0
 
   -- Operation: replace the active NAV snapshot with the manager-provided valuation.
   Some (navCid, _) <- queryByKey @NAV manager (manager, vaultId)
   _ <- submit manager $ exerciseCmd navCid UpdateNAV with
-    newNav = 60.0 + 3.0 * updatedSolPrice + 0.005 * updatedBtcPrice + 0.1 * updatedEthPrice
+    newNav = 100.0 + 4.0 * updatedTreasuryPrice + 6.0 * updatedCreditPrice + 1.0 * updatedPropertyPrice
     newTotalShares = 1000.0
 
   -- Sanity check: the updated snapshot records the gain while preserving share supply.
-  assertValuation manager vaultId 1400.0 1000.0
+  assertValuation manager vaultId 1036.0 1000.0
   -- ------------------------------------------------------------
 
   -- Investment: Recover Liquidity
-  -- Sell 2 SOL and all ETH, retaining 800 USDCx + 1 SOL + 0.005 BTC.
+  -- Sell 2 treasury units and the property unit, retaining 522 USDCx + 2 treasury
+  -- units + 6 credit units.
 
-  -- Sell SOL: the counterparty pays using cash received from the basket purchases.
-  solBuyerCash <- queryFilter @Cash.USDCxHolding counterparty (\h -> h.account == counterpartyAccount)
-  solSaleCid <- submit counterparty $ createCmd solOffer with
-    terms = solOffer.terms with direction = SellAsset; quantity = 2.0; unitPrice = updatedSolPrice
-    counterpartyHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- solBuyerCash]
-  solToSell <- queryFilter @Asset.TokenizedAssetHolding manager
-    (\h -> h.account == treasury && h.instrumentId == sol)
+  -- Sell treasury units: the counterparty pays using cash received from the portfolio purchases.
+  treasuryBuyerCash <- queryFilter @Cash.USDCxHolding counterparty (\h -> h.account == counterpartyAccount)
+  treasurySaleCid <- submit counterparty $ createCmd treasuryOffer with
+    terms = treasuryOffer.terms with direction = SellAsset; quantity = 2.0; unitPrice = updatedTreasuryPrice
+    counterpartyHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- treasuryBuyerCash]
+  treasuryToSell <- queryFilter @Asset.TokenizedAssetHolding manager
+    (\h -> h.account == treasury && h.instrumentId == treasuryFund)
   _ <- submit manager $ exerciseCmd vaultCid Sell with
-    offerCid = toInterfaceContractId @ITradeOffer solSaleCid
+    offerCid = toInterfaceContractId @ITradeOffer treasurySaleCid
     handlerCid = toInterfaceContractId @ITradeHandler investmentHandlerCid
-    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- solToSell]
+    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- treasuryToSell]
     extraArgs = emptyExtraArgs
 
   -- Sanity check: reconcile the remaining asset and both cash balances.
-  None <- queryContractId manager solSaleCid
-  assertAssetBalance manager treasury sol 1.0
-  assertCashBalance manager treasury 460.0
-  assertCashBalance counterparty counterpartyAccount 540.0
+  None <- queryContractId manager treasurySaleCid
+  assertAssetBalance manager treasury treasuryFund 2.0
+  assertCashBalance manager treasury 302.0
+  assertCashBalance counterparty counterpartyAccount 698.0
 
-  -- Sell ETH: the counterparty pays using cash received from the basket purchases.
-  ethBuyerCash <- queryFilter @Cash.USDCxHolding counterparty (\h -> h.account == counterpartyAccount)
-  ethSaleCid <- submit counterparty $ createCmd ethOffer with
-    terms = ethOffer.terms with direction = SellAsset; quantity = 0.1; unitPrice = updatedEthPrice
-    counterpartyHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- ethBuyerCash]
-  ethToSell <- queryFilter @Asset.TokenizedAssetHolding manager
-    (\h -> h.account == treasury && h.instrumentId == eth)
+  -- Sell the property unit: the counterparty pays using cash received from the portfolio purchases.
+  propertyBuyerCash <- queryFilter @Cash.USDCxHolding counterparty (\h -> h.account == counterpartyAccount)
+  propertySaleCid <- submit counterparty $ createCmd propertyOffer with
+    terms = propertyOffer.terms with direction = SellAsset; quantity = 1.0; unitPrice = updatedPropertyPrice
+    counterpartyHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- propertyBuyerCash]
+  propertyToSell <- queryFilter @Asset.TokenizedAssetHolding manager
+    (\h -> h.account == treasury && h.instrumentId == propertyFund)
   _ <- submit manager $ exerciseCmd vaultCid Sell with
-    offerCid = toInterfaceContractId @ITradeOffer ethSaleCid
+    offerCid = toInterfaceContractId @ITradeOffer propertySaleCid
     handlerCid = toInterfaceContractId @ITradeHandler investmentHandlerCid
-    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- ethToSell]
+    treasuryHoldingCids = [toInterfaceContractId @Holding cid | (cid, _) <- propertyToSell]
     extraArgs = emptyExtraArgs
 
   -- Sanity check: reconcile the remaining asset and both cash balances.
-  None <- queryContractId manager ethSaleCid
-  assertAssetBalance manager treasury eth 0.0
-  assertCashBalance manager treasury 800.0
-  assertCashBalance counterparty counterpartyAccount 200.0
+  None <- queryContractId manager propertySaleCid
+  assertAssetBalance manager treasury propertyFund 0.0
+  assertCashBalance manager treasury 522.0
+  assertCashBalance counterparty counterpartyAccount 478.0
 
-  -- Sanity check: BTC and remaining SOL stay invested; the sale leaves NAV unchanged.
-  assertAssetBalance manager treasury sol 1.0
-  assertAssetBalance manager treasury btc 0.005
-  assertAssetBalance counterparty counterpartyAccount sol 2.0
-  assertAssetBalance counterparty counterpartyAccount eth 0.1
-  assertAssetBalance counterparty counterpartyAccount btc 0.0
-  assertValuation manager vaultId 1400.0 1000.0
+  -- Sanity check: credit units and remaining treasury units stay invested; the sale leaves NAV unchanged.
+  assertAssetBalance manager treasury treasuryFund 2.0
+  assertAssetBalance manager treasury creditFund 6.0
+  assertAssetBalance counterparty counterpartyAccount treasuryFund 2.0
+  assertAssetBalance counterparty counterpartyAccount propertyFund 1.0
+  assertAssetBalance counterparty counterpartyAccount creditFund 0.0
+  assertValuation manager vaultId 1036.0 1000.0
   -- ------------------------------------------------------------
 
   -- Partial Redeem & Final Balances
-  -- Redeem 500 shares at 1.40: 699 USDCx to the depositor and 1 to fee treasury.
+  -- Redeem 500 shares at 1.036: 517 USDCx to the depositor and 1 to fee treasury.
 
   -- Setup: reuse the fee model and disclose the share registry needed for the split.
   redeemHandlerCid <- submit manager $ createCmd RedeemHandler with
@@ -265,8 +268,8 @@ vaultFlow = script do
 
   -- Sanity check: redemption uses the new share price and returns the expected fee and payout.
   assertMsg "redeem uses the updated share price and charges one USDCx"
-    (redeemed.sharePrice == 1.4 && redeemed.redeemedShares == 500.0
-      && redeemed.amount == 700.0 && redeemed.receivedAmount == 699.0 && redeemed.fee == 1.0)
+    (redeemed.sharePrice == 1.036 && redeemed.redeemedShares == 500.0
+      && redeemed.amount == 518.0 && redeemed.receivedAmount == 517.0 && redeemed.fee == 1.0)
 
   -- Sanity check: only the unredeemed shares remain and the request is consumed.
   [(_, finalShares)] <- query @Share depositor
@@ -274,15 +277,15 @@ vaultFlow = script do
   None <- queryContractId depositor redeemRequest.requestCid
 
   -- Sanity check: reconcile the payout, accumulated fees and remaining treasury cash.
-  assertCashBalance depositor (basicAccount depositor) 699.0
+  assertCashBalance depositor (basicAccount depositor) 517.0
   assertCashBalance manager feeTreasury 2.0
-  assertCashBalance manager treasury 100.0
+  assertCashBalance manager treasury 4.0
 
-  -- Sanity check: the remaining basket backs NAV 700 and the 500 outstanding shares.
-  assertAssetBalance manager treasury sol 1.0
-  assertAssetBalance manager treasury btc 0.005
-  assertAssetBalance manager treasury eth 0.0
-  assertValuation manager vaultId (100.0 + 1.0 * updatedSolPrice + 0.005 * updatedBtcPrice) 500.0
+  -- Sanity check: the remaining portfolio backs NAV 518 and the 500 outstanding shares.
+  assertAssetBalance manager treasury treasuryFund 2.0
+  assertAssetBalance manager treasury creditFund 6.0
+  assertAssetBalance manager treasury propertyFund 0.0
+  assertValuation manager vaultId (4.0 + 2.0 * updatedTreasuryPrice + 6.0 * updatedCreditPrice) 500.0
   -- ------------------------------------------------------------
 
 -- Repeated checks stay small so the sequence of ledger operations remains visible.

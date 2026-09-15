@@ -3,8 +3,8 @@
 
 module TokenizedAsset where
 
--- Demo BTC, ETH and SOL assets shared by tests and sandbox deployments.
--- These represent simulated balances, with no backing or bridge to native chains.
+-- Demo units of tokenized funds shared by tests and sandbox deployments.
+-- These represent simulated balances, with no underlying fund behind them.
 -- Prices in USDCx belong to quotes or valuations and are independent of holdings.
 -- Uses the token-standard interfaces; cancellation and withdrawal are unsupported.
 
@@ -18,7 +18,7 @@ import Splice.Api.Token.AllocationV2
 import Splice.Api.Token.HoldingV2
 import Splice.Api.Token.MetadataV1
 
-data Asset = BTC | ETH | SOL
+data Asset = TREASURY_FUND | CREDIT_FUND | PROPERTY_FUND
   deriving (Eq, Show)
 
 assetInstrumentId : Party -> Asset -> InstrumentId
@@ -26,7 +26,7 @@ assetInstrumentId admin asset = InstrumentId with admin; id = show asset
 
 supportedInstrument : Party -> InstrumentId -> Bool
 supportedInstrument admin instrumentId =
-  instrumentId `elem` map (assetInstrumentId admin) [BTC, ETH, SOL]
+  instrumentId `elem` map (assetInstrumentId admin) [TREASURY_FUND, CREDIT_FUND, PROPERTY_FUND]
 
 accountOwner : Account -> Party
 accountOwner account = fromSomeNote "demo holdings require an account owner" account.owner
