@@ -28,10 +28,10 @@ showcases a single design solution on its own.
 
 ## Vault example
 
-[`vault-example/`](vault-example/README.md) is a self-contained vault example
-based on VaultKit. It demonstrates deposit and redeem flows across interface,
-public, and private packages, with a separate test package and a two-participant
-sandbox showing the interaction between the depositor and the manager.
+[`vault-example/`](vault-example/README.md) is a vault demo based on VaultKit
+that shows the patterns above working together. It composes access control,
+pluggable components, and the public-private split into one deposit,
+investment, valuation, and redemption flow.
 
 ## Build and test
 
