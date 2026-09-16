@@ -1,116 +1,71 @@
 # Vault Example
 
-A self-contained vault implementation based on VaultKit, demonstrating
-access control, NAV-based share pricing, and deposit and redeem workflows
-on Canton.
+## Overview
 
-The example separates the contracts shared with depositors from the manager's
-private processing logic through an interface package. A two-participant sandbox
-shows how both parties interact while using different sets of DAR files.
+A self-contained vault based on VaultKit that shows how the patterns in this
+repository fit together and how a vault could incorporate them.
 
-## Layout
+The example shows how to:
 
-```text
-vault-example/
-├── multi-package.yaml
-├── interface/
-│   ├── daml.yaml
-│   └── daml/
-├── public/
-│   ├── daml.yaml
-│   └── daml/
-├── private/
-│   ├── daml.yaml
-│   └── daml/
-├── test/
-│   ├── daml.yaml
-│   ├── Onboarding/
-│   ├── Valuation/
-│   ├── Deposit/
-│   ├── Redeem/
-│   └── Integration/
-└── sandbox/
-```
+- Onboard depositors with a revocable attestation and per-vault permissions.
+- Accept Token Standard V2 tokens.
+- Issue vault shares as CIP-0112-compatible tokens.
+- Invest the treasury in other tokenized assets.
+- Simulate changes in the underlying assets by updating the NAV.
+- Execute deposit and share mint, and redeem and share burn, as atomic
+  transactions.
+- Include a simple fee implementation to demonstrate how interfaces can hide
+  a private implementation that only the manager's participant installs.
 
-- `interface/`: interfaces and shared types used across the package boundary.
-- `public/`: contracts that counterparties interact with. Depends on `interface/`.
-- `private/`: manager-side implementations. Depends on `interface/` and `public/`.
-- `test/`: one Daml Script package, grouped by feature. Its source root is `.`.
-  It depends on all three implementation packages.
-  Folder names match Daml module names, for example `Onboarding/Access.daml`
-  declares `module Onboarding.Access where`.
-- `sandbox/`: the two-participant environment for the depositor and manager.
+## How it works
 
-The example owns its contracts and interfaces and has no dependencies on the
-patterns' packages. Daml Script is confined to the test package.
+[`test/Integration/VaultFlow.daml`](test/Integration/VaultFlow.daml) runs a
+portfolio of tokenized fund units end to end and is the best guide to the
+example.
 
-Interfaces, their modules, and files use the `I` prefix (for example,
-`IAccessAttestation.daml`). Their view records use the `Info` suffix.
+1. **Onboarding.** The manager creates a `Vault` and an empty `NAV`, records
+   the depositor's approval in an `AccessAttestation`, and exercises
+   `Vault.GrantAccess` to issue a `VaultAccess`.
+2. **Deposit.** The depositor exercises `VaultAccess.Deposit` with 1,001
+   USDCx. The choice locks the funds in an allocation and creates a
+   `DepositRequest`. The manager exercises `HandleDeposit`: the private
+   `DepositHandler` charges the flat fee of 1, quotes 1,000 shares at price 1,
+   and updates `NAV`; `DepositRequest.Consume` then settles 1,000 to the
+   treasury and 1 to the fee treasury, mints the `Share`, and records the
+   mint event in `ShareRegistry`.
+3. **Investment.** A counterparty signs a `TradeOffer` for each asset. The
+   manager exercises `Vault.Buy`; the private `TradeHandler` checks the offer
+   against the allowed assets and trade limit, then `ExecuteTrade` settles the
+   cash and asset legs together. The vault ends with 4 treasury fund units,
+   6 credit fund units, 1 property fund unit, and 100 USDCx.
+4. **Valuation.** The manager exercises `UpdateNAV` with the revalued
+   portfolio. NAV becomes 1,036 for 1,000 shares, so the share price is
+   1.036. Selling 2 treasury units and the property unit through `Vault.Sell`
+   brings treasury cash to 522 without changing NAV.
+5. **Redemption.** The depositor exercises `Share.Redeem` for 500 shares.
+   The lot splits into an unlocked remainder and a locked lot reserved by a
+   `ShareAllocation`, and a `RedeemRequest` is created. The manager exercises
+   `Vault.HandleRedeem`: the private `RedeemHandler` quotes 518 at price
+   1.036 less the fee of 1 and updates `NAV`; `ConsumeRedeem` pays 517 to the
+   depositor and 1 to the fee treasury, then burns the reserved lot.
 
-## Admin-led access
+The feature tests under `Onboarding/`, `Valuation/`, `Deposit/`, `Redeem/`,
+and `Investment/` cover each step in isolation, including a failed asset
+delivery that rolls back the cash payment.
 
-The `manager` creates a `Vault` and administers access in two steps:
+## Simplifications
 
-- `AccessAttestation` records the depositor's onboarding approval and the
-  `vaultIds` it covers. An optional `evidenceHash` references off-ledger evidence.
-- `Vault.GrantAccess` reads the active approval through `IAccessAttestation`,
-  checks the manager, depositor, and vault scope, and creates a `VaultAccess`
-  referencing that approval. The choice keeps the vault active.
+- Valuation is a manual snapshot set by the manager. No oracle, freshness
+  check, or reconciliation with issued shares.
+- The only fee model is a flat fee of one unit, for both deposits and
+  redemptions.
+- Access is admin-led. The depositor-led request path from the `vault-access`
+  pattern is not included.
+- Demo assets do not support cancelling or withdrawing allocations, so
+  `Cancel` and `Reject` on a `DepositRequest` fail against them. Share
+  reservations can be cancelled and withdrawn.
 
-Both contracts are signed by the manager and observed by the depositor. Each
-has a manager-controlled `Revoke` choice that archives that contract. Issuing
-access requires the manager's authorization; the depositor has no access-request
-choice.
-
-`IAccessAttestation` and `IVaultAccess` expose their views from the interface
-package. Operations using a permission must fetch both active contracts and
-check the manager, depositor, and vault scope. Storing the attestation's contract
-ID alone does not validate it when the manager creates `VaultAccess` directly.
-
-### Vault identity
-
-`Vault` exposes `vaultId`, `manager`, and `name` through `IVault`. Its contract
-key is `(manager, vaultId)`, maintained by the manager. `VaultAccess` retains
-those identity fields, so the same key can be reconstructed without storing
-another field. The key resolves a concrete `Vault`; its contract ID can then
-be converted to `ContractId IVault` for interface-based interactions.
-
-Canton 3.5 permits duplicate keys. Keeping one active vault per key is the
-manager's operational responsibility. Key-based lookups require appropriate
-contract visibility and authorization.
-
-`test/Onboarding/Access.daml` covers vault lookup by key, interface reads,
-onboarding approval, and the manager granting a permission visible to the depositor.
-
-## Valuation
-
-`private/daml/NAV.daml` holds a manager-reported valuation snapshot. The manager signs
-it and controls `UpdateNAV`; optional `auditors` observe the full contract.
-The depositor receives valuation results through the public workflows. An
-interface definition alone grants no visibility into the underlying contract.
-
-`INAV` exposes `vaultId`, `manager`, `nav`, `totalShares`, `sharePrice`, and
-`updatedAt`. The price is derived from `nav / totalShares`. An empty vault has
-zero NAV and zero shares, with an initial price of `1`. Funded vaults require
-a positive share price.
-
-`UpdateNAV` atomically archives the snapshot and creates its replacement under
-the same `(manager, vaultId)` key. The manager must maintain one active snapshot
-per key, since Canton permits duplicates. Manager-side pricing can resolve it
-with `fetchByKey @NAV (manager, vaultId)` and use its `INAV` view. The template
-type selects the lookup: `@Vault` and `@NAV` use the same key value to resolve
-their respective contracts.
-
-The update takes NAV and share supply as inputs and sets `updatedAt` from ledger
-time using `getTime`. This timestamp records when the snapshot was updated.
-Oracle integration must validate price freshness using the oracle's own timestamps.
-Oracle price aggregation and reconciliation with issued shares belong to the
-valuation and settlement workflows; this snapshot records the manager's figures.
-
-`test/Valuation/NAV.daml` checks the initial price, update by key, replacement
-lookup, derived price, and auditor/depositor visibility.
-
-## Build and test
+## Run the tests
 
 From the repository root:
 
@@ -120,17 +75,3 @@ make test-vault-example
 ```
 
 `make build` and `make test` include the example alongside the patterns.
-The example can also be built independently with `dpm build --all` from this
-directory.
-
-## Participants and packages
-
-| Participant | Packages |
-| --- | --- |
-| Depositor | `interface`, `public` |
-| Manager | `interface`, `public`, `private` |
-
-The depositor submits requests through the public contracts. The manager
-processes those requests using the private implementations, and the depositor
-receives the public results. The interface package defines the shared boundary
-between these layers.

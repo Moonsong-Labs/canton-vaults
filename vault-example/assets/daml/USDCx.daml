@@ -3,7 +3,7 @@
 
 module USDCx where
 
--- Demo asset shared by tests and sandbox deployments.
+-- Demo asset shared by the tests.
 -- Uses the token-standard interfaces; cancellation and withdrawal are unsupported.
 
 import DA.List (dedup, sort)

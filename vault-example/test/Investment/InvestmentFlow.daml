@@ -21,7 +21,7 @@ buyAndSell = script do
   InvestmentSetup{..} <- setupInvestment ()
   let manager = vault.manager
 
-  -- Buy 1 SOL for 150 USDCx from a seller holding 2 SOL.
+  -- Buy 1 treasury fund unit for 150 USDCx from a seller holding 2 units.
   offerCid <- submit counterparty $ createCmd offer
   _ <- submit manager $ exerciseCmd vaultCid Buy with
     offerCid = toInterfaceContractId @ITradeOffer offerCid; handlerCid
@@ -29,7 +29,7 @@ buyAndSell = script do
   None <- queryContractId manager offerCid
   [(assetCid, purchased)] <- queryFilter @Asset.TokenizedAssetHolding manager (\h -> h.account == vault.treasury)
   [(paymentCid, payment)] <- query @Cash.USDCxHolding counterparty
-  assertMsg "purchase exchanges cash for one unlocked SOL"
+  assertMsg "purchase exchanges cash for one unlocked fund unit"
     (purchased.amount == 1.0 && purchased.instrumentId == offer.terms.asset
       && purchased.lock == None && payment.amount == 150.0)
 
@@ -45,7 +45,7 @@ buyAndSell = script do
 
   assets <- query @Asset.TokenizedAssetHolding manager
   cash <- query @Cash.USDCxHolding manager
-  assertMsg "both accounts retain their expected SOL balances"
+  assertMsg "both accounts retain their expected fund unit balances"
     (sum [h.amount | (_, h) <- assets, h.account == vault.treasury] == 0.5
       && sum [h.amount | (_, h) <- assets, h.account == offer.counterpartyAccount] == 1.5
       && all (\(_, h) -> h.lock == None) assets)
@@ -58,7 +58,7 @@ failedDeliveryRollsBack : Script ()
 failedDeliveryRollsBack = script do
   InvestmentSetup{..} <- setupInvestment ()
   let manager = vault.manager
-      -- Treasury can pay 315 USDCx, but the seller only owns 2 SOL.
+      -- Treasury can pay 315 USDCx, but the seller only owns 2 units.
       oversized = offer with terms = offer.terms with quantity = 2.1
   offerCid <- submit counterparty $ createCmd oversized
   submitMustFail manager $ exerciseCmd vaultCid Buy with
@@ -73,7 +73,7 @@ failedDeliveryRollsBack = script do
   [] <- query @Cash.USDCxHolding counterparty
   [] <- queryInterface @Allocation manager
   [(_, originalAsset)] <- query @Asset.TokenizedAssetHolding counterparty
-  assertMsg "seller keeps its unlocked SOL" (originalAsset.amount == 2.0 && originalAsset.lock == None)
+  assertMsg "seller keeps its unlocked fund units" (originalAsset.amount == 2.0 && originalAsset.lock == None)
 
 data InvestmentSetup = InvestmentSetup with
   vault : Vault
@@ -93,7 +93,7 @@ setupInvestment () = script do
   cashIssuer <- allocateParty "USDCx issuer"
   assetIssuer <- allocateParty "Asset issuer"
   let currency = InstrumentId with admin = cashIssuer; id = "USDCx"
-      instrument = Asset.assetInstrumentId assetIssuer Asset.SOL
+      instrument = Asset.assetInstrumentId assetIssuer Asset.TREASURY_FUND
       vaultId = "investment-vault"
       treasury = (basicAccount manager) with id = vaultId
       vault = Vault with
