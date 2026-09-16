@@ -7,17 +7,15 @@ repository fit together and how a vault could incorporate them.
 
 The example shows how to:
 
-- Onboard depositors with a revocable attestation and per-vault permission.
-- Accept deposits in Token Standard V2-compatible tokens and mint vault
-  shares as Token Standard holdings with CIP-112 events, with settlement,
-  minting, and fee collection in one transaction.
-- Invest the treasury in other tokenized assets through counterparty-signed
-  offers, with both legs of the trade settling atomically.
-- Report a valuation snapshot that sets the share price.
-- Redeem shares partially, burning the redeemed lot and paying out at the
-  current price.
-- Keep fee, pricing, and investment policy in a private package that only the
-  manager's participant installs.
+- Onboard depositors with a revocable attestation and per-vault permissions.
+- Accept Token Standard V2 tokens.
+- Issue vault shares as CIP-0112-compatible tokens.
+- Invest the treasury in other tokenized assets.
+- Simulate changes in the underlying assets by updating the NAV.
+- Execute deposit and share mint, and redeem and share burn, as atomic
+  transactions.
+- Include a simple fee implementation to demonstrate how interfaces can hide
+  a private implementation that only the manager's participant installs.
 
 ## How it works
 
@@ -66,7 +64,6 @@ delivery that rolls back the cash payment.
 - Demo assets do not support cancelling or withdrawing allocations, so
   `Cancel` and `Reject` on a `DepositRequest` fail against them. Share
   reservations can be cancelled and withdrawn.
-- `sandbox/` is a placeholder. There is no two-participant deployment yet.
 
 ## Run the tests
 
