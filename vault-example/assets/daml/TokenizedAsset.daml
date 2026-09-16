@@ -3,7 +3,7 @@
 
 module TokenizedAsset where
 
--- Demo units of tokenized funds shared by tests and sandbox deployments.
+-- Demo units of tokenized funds shared by the tests.
 -- These represent simulated balances, with no underlying fund behind them.
 -- Prices in USDCx belong to quotes or valuations and are independent of holdings.
 -- Uses the token-standard interfaces; cancellation and withdrawal are unsupported.
