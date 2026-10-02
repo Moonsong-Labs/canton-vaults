@@ -10,8 +10,16 @@ PATTERN_PACKAGES := \
 PATTERN_TEST_PACKAGES := $(patsubst %/daml.yaml,%,$(wildcard patterns/*/test/daml.yaml))
 PATTERNS := $(notdir $(patsubst %/test,%,$(PATTERN_TEST_PACKAGES)))
 
+# OpenZeppelin daml-lint, pinned to the commit the baseline was reviewed with.
+DAML_LINT_REPO := https://github.com/OpenZeppelin/daml-lint
+DAML_LINT_REV := cba698832991f640f0e0d8a9e2bfb683717c6024
+DAML_LINT ?= daml-lint
+DAML_LINT_BASELINE := .github/daml-lint-baseline.txt
+# Non-test sources only; daml-lint would otherwise also scan tests and .daml build caches.
+DAML_LINT_SOURCES := $(filter-out %/test/daml,$(wildcard patterns/*/daml patterns/*/*/daml vault-example/*/daml))
+
 .PHONY: clean build test build-patterns test-patterns sandbox-smoke sandbox-public-private \
-	build-vault-example test-vault-example \
+	build-vault-example test-vault-example install-daml-lint lint \
 	$(addprefix build-,$(PATTERNS)) $(addprefix test-,$(PATTERNS))
 
 # Remove local Daml build artifacts.
@@ -45,6 +53,29 @@ build-vault-example:
 
 test-vault-example: build-vault-example
 	@dpm test --package-root vault-example/test --all --show-coverage
+
+install-daml-lint:
+	cargo install --locked --git $(DAML_LINT_REPO) --rev $(DAML_LINT_REV) daml-lint
+
+# Fails on findings missing from the reviewed baseline and on baseline entries that no longer occur.
+# CRITICAL findings fail before the comparison, so they cannot be baselined.
+lint:
+	@mkdir -p log
+	@$(DAML_LINT) $(DAML_LINT_SOURCES) --format markdown --output log/daml-lint.md --fail-on critical
+	@$(DAML_LINT) $(DAML_LINT_SOURCES) --format json --output log/daml-lint.json --fail-on critical
+	@jq -r '.findings[] | "\(.severity) \(.detector) \(.file): \(.message)"' log/daml-lint.json \
+		> log/daml-lint.unsorted.txt
+	@LC_ALL=C sort log/daml-lint.unsorted.txt > log/daml-lint.txt
+	@grep -v -e '^#' -e '^$$' $(DAML_LINT_BASELINE) | LC_ALL=C sort > log/daml-lint-baseline.txt
+	@if ! cmp -s log/daml-lint-baseline.txt log/daml-lint.txt; then \
+		echo "daml-lint findings differ from $(DAML_LINT_BASELINE)."; \
+		echo "New findings (fix them, or review them and add them to the baseline):"; \
+		LC_ALL=C comm -13 log/daml-lint-baseline.txt log/daml-lint.txt | sed 's/^/  + /'; \
+		echo "Resolved findings (remove them from the baseline):"; \
+		LC_ALL=C comm -23 log/daml-lint-baseline.txt log/daml-lint.txt | sed 's/^/  - /'; \
+		exit 1; \
+	fi
+	@echo "daml-lint: all $$(wc -l < log/daml-lint.txt | tr -d ' ') findings are in the reviewed baseline."
 
 # Two-participant demo from the public-private-split pattern.
 sandbox-smoke: sandbox-public-private
