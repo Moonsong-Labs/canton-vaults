@@ -72,6 +72,9 @@ delivery that rolls back the cash payment.
   check, or reconciliation with issued shares.
 - The only fee model is a flat fee of one unit, capped at half the amount, for
   both deposits and redemptions.
+- The manager sets NAV and decides when each request executes. Holders can
+  cancel pending requests, but they cannot set limits on the price or fee they
+  accept, and no exit bypasses the manager.
 - Access is admin-led. The depositor-led request path from the `vault-access`
   pattern is not included.
 - Demo assets do not support cancelling or withdrawing allocations, so
