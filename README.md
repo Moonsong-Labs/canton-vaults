@@ -72,6 +72,21 @@ docker build -t canton-vaults-dev .
 docker run --rm -v "$PWD":/workspace -w /workspace canton-vaults-dev make build test
 ```
 
+## Static analysis
+
+CI scans the non-test Daml sources with OpenZeppelin's
+[daml-lint](https://github.com/OpenZeppelin/daml-lint), pinned in the
+`Makefile`. It needs Rust and `jq`:
+
+```sh
+make install-daml-lint
+make lint
+```
+
+`make lint` fails on any finding missing from the reviewed baseline,
+[`.github/daml-lint-baseline.txt`](.github/daml-lint-baseline.txt), and on
+baseline entries that no longer occur.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

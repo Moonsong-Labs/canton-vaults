@@ -52,3 +52,24 @@ jobs:
           path: ${{ runner.temp }}/canton-sandbox-logs/
           if-no-files-found: ignore
           retention-days: 7
+
+  daml-lint:
+    name: daml-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install daml-lint
+        run: make install-daml-lint
+
+      - name: Compare daml-lint findings with the reviewed baseline
+        run: make lint
+
+      - name: Publish daml-lint report
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f log/daml-lint.md ]; then
+            cat log/daml-lint.md >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,43 @@
+# Reviewed daml-lint findings, one per line: "<severity> <detector> <file>: <message>".
+# `make lint` fails when a finding is missing from this list or an entry here no
+# longer occurs. Add an entry only after reviewing the finding; record why it is
+# not a defect in the comment above its group.
+
+# Every caller passes a positive price: the NAV ensure keeps the price above zero
+# and DepositRequest.Consume asserts it before calling sharesForDeposit.
+HIGH unguarded-division vault-example/interface/daml/IDepositHandler.daml: Unguarded division by 'sharePrice' — no prior > 0 check found in function 'sharesForDeposit'.
+# Guarded by `if totalShares == 0.0`; the detector only recognises assert lines.
+HIGH unguarded-division vault-example/private/daml/NAV.daml: Unguarded division by 'totalShares' — no prior > 0 check found in function 'pricePerShare'.
+
+# The created DepositRequest's ensure rejects a non-positive amount
+# (patterns/03-public-private-split DepositTest checks it).
+HIGH missing-positive-amount patterns/03-public-private-split/public/daml/VaultAccess.daml: Choice 'Deposit' accepts Decimal parameter 'amount' without asserting > 0.
+# An empty list fails the downstream checks that the holdings cover the amount
+# (TradeOffer.settleTransfer and RedeemRequest.ConsumeRedeem).
+HIGH missing-positive-amount vault-example/public/daml/Vault.daml: Choice 'Buy' accepts list parameter 'treasuryHoldingCids' but has no minimum-length check.
+HIGH missing-positive-amount vault-example/public/daml/Vault.daml: Choice 'HandleRedeem' accepts list parameter 'treasuryHoldingCids' but has no minimum-length check.
+HIGH missing-positive-amount vault-example/public/daml/Vault.daml: Choice 'Sell' accepts list parameter 'treasuryHoldingCids' but has no minimum-length check.
+
+# Identifiers, names and party lists chosen by a signatory of the contract. The one
+# counterparty-signed template, TradeOffer, caps its holdings list, and executing it
+# checks vaultId against the vault, so an oversized ID only fails that trade.
+MEDIUM unbounded-fields patterns/01-vault-access/daml/AccessRequest.daml: Template 'AccessRequest' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields patterns/01-vault-access/daml/DepositRequest.daml: Template 'DepositRequest' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields patterns/01-vault-access/daml/Share.daml: Template 'Share' has unbounded Text field 'uuid' with no ensure clause bounding their length.
+MEDIUM unbounded-fields patterns/01-vault-access/daml/VaultAccess.daml: Template 'VaultAccess' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields patterns/02-pluggable-component/daml/TieredFee.daml: Template 'TieredFee' has unbounded List field 'tiers' with no ensure clause bounding their length.
+MEDIUM unbounded-fields patterns/03-public-private-split/public/daml/DepositRequest.daml: Template 'DepositReceipt' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields patterns/03-public-private-split/public/daml/DepositRequest.daml: Template 'DepositRequest' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields patterns/03-public-private-split/public/daml/VaultAccess.daml: Template 'VaultAccess' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/private/daml/DepositHandler.daml: Template 'DepositHandler' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/private/daml/NAV.daml: Template 'NAV' has unbounded fields 'vaultId', 'auditors' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/private/daml/RedeemHandler.daml: Template 'RedeemHandler' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/private/daml/TradeHandler.daml: Template 'TradeHandler' has unbounded fields 'vaultId', 'allowedAssets' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/public/daml/DepositRequest.daml: Template 'DepositRequest' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/public/daml/RedeemRequest.daml: Template 'RedeemRequest' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/public/daml/Share.daml: Template 'Share' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/public/daml/Share.daml: Template 'ShareAllocation' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/public/daml/ShareRegistry.daml: Template 'ShareRegistry' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/public/daml/TradeOffer.daml: Template 'TradeOffer' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/public/daml/Vault.daml: Template 'Vault' has unbounded fields 'vaultId', 'name' with no ensure clause bounding their length.
+MEDIUM unbounded-fields vault-example/public/daml/VaultAccess.daml: Template 'VaultAccess' has unbounded Text field 'vaultId' with no ensure clause bounding their length.
