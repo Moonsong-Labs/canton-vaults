@@ -56,9 +56,11 @@ redemption pays shares times that price rounded down. Rounding remainders stay
 with the outstanding shares, so a partial redemption receives less than its
 exact pro-rata value by under (shares + 1) × 1e-10, and the last redemption
 receives the remaining NAV. The public settlement checks each payout against
-its quoted price. `NAV` reports the price rounded to nearest. It rejects
-valuations whose redemption price would round to zero, and caps NAV and supply
-at 1e17 so pricing stays exact.
+its quoted price. `NAV` reports the price rounded to nearest, for display
+only. It rejects valuations whose redemption price would fall below 1e-6, and
+caps NAV and supply at 1e17 so pricing stays exact. Deposits and redemptions
+never lower the price, so these limits can reject a deposit or a revaluation but
+never a redemption.
 
 The feature tests under `Onboarding/`, `Valuation/`, `Deposit/`, `Redeem/`,
 and `Investment/` cover each step in isolation, including a failed asset

@@ -24,8 +24,7 @@ template NAV
         && totalShares >= 0.0
         && (totalShares > 0.0 || nav == 0.0)
         && nav <= pricingLimit && totalShares <= pricingLimit
-        -- Redemptions are always priced above zero.
-        && redeemSharePrice nav totalShares > 0.0
+        && redeemSharePrice nav totalShares >= minSharePrice
 
     -- Updates retain this identity; the manager must avoid duplicate initial snapshots.
     key (manager, vaultId) : VaultKey
@@ -52,6 +51,11 @@ template NAV
 -- below 1e18; bounding NAV and supply keeps that product in range.
 pricingLimit : Decimal
 pricingLimit = 100_000_000_000_000_000.0
+
+-- The lowest redemption price a valuation may set. At 1e-6 the 10-decimal price
+-- keeps at least five significant figures, so rounding moves it by at most 1e-4.
+minSharePrice : Decimal
+minSharePrice = 0.000001
 
 -- Empty vaults start at one unit per share. The view reports this price rounded
 -- to nearest; deposits and redemptions use the directed prices below.
