@@ -158,6 +158,30 @@ redeemWholeSupplyAtUnevenPrice = script do
   Some (_, nav) <- queryByKey @NAV manager (manager, vault.vaultId)
   assertMsg "the vault is empty" (nav.nav == 0.0 && nav.totalShares == 0.0)
 
+redeemSmallVault : Script ()
+redeemSmallVault = script do
+  -- The whole vault is worth 0.8, less than the one-unit fee. The fee is capped at
+  -- half the payout, so the last holder can still close the vault.
+  RedeemSetup{..} <- setupRedeem ()
+  let manager = vault.manager
+  Some (navCid, _) <- queryByKey @NAV manager (manager, vault.vaultId)
+  _ <- submit manager $ exerciseCmd navCid UpdateNAV with newNav = 0.8; newTotalShares = 100.0
+  Some registryDisclosure <- queryDisclosure manager shareRegistryCid
+  requested <- submit (actAs depositor <> disclose registryDisclosure) $ exerciseCmd shareCid Redeem with
+    sharesToRedeem = 100.0
+    shareRegistryCid = toInterfaceContractId shareRegistryCid
+  result <- submit manager $ exerciseCmd vaultCid HandleRedeem with
+    requestCid = requested.requestCid
+    handlerCid
+    treasuryHoldingCids = [treasuryHoldingCid]
+    allocationFactoryCid = testAllocationFactoryCid registry
+    settlementFactoryCid = testSettlementFactoryCid registry
+    extraArgs = emptyExtraArgs
+  assertMsg "the last holder receives the NAV less half as fee"
+    (result.amount == 0.8 && result.fee == 0.4 && result.receivedAmount == 0.4)
+  Some (_, nav) <- queryByKey @NAV manager (manager, vault.vaultId)
+  assertMsg "the vault is empty" (nav.nav == 0.0 && nav.totalShares == 0.0)
+
 redeemSettlementChecksQuote : Script ()
 redeemSettlementChecksQuote = script do
   RedeemSetup{..} <- setupRedeem ()

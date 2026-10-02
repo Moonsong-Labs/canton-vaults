@@ -68,8 +68,8 @@ delivery that rolls back the cash payment.
 
 - Valuation is a manual snapshot set by the manager. No oracle, freshness
   check, or reconciliation with issued shares.
-- The only fee model is a flat fee of one unit, for both deposits and
-  redemptions.
+- The only fee model is a flat fee of one unit, capped at half the amount, for
+  both deposits and redemptions.
 - Access is admin-led. The depositor-led request path from the `vault-access`
   pattern is not included.
 - Demo assets do not support cancelling or withdrawing allocations, so

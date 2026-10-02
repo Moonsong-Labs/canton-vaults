@@ -5,7 +5,8 @@ module FlatFee where
 
 import IFee
 
--- One USDCx, reusable by deposit and redeem handlers.
+-- One USDCx, reusable by deposit and redeem handlers. Capping it at half the amount
+-- lets small holdings and the last holder redeem.
 template FlatFee
   with manager : Party
   where
@@ -13,4 +14,4 @@ template FlatFee
 
     interface instance IFee for FlatFee where
       view = FeeInfo with manager
-      calculateFee _ = 1.0
+      calculateFee amount = min 1.0 (amount / 2.0)
