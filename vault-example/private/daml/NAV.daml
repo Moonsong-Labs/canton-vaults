@@ -3,6 +3,7 @@
 
 module NAV where
 
+import DA.Numeric qualified as Numeric
 import IVault (VaultKey)
 import INAV
 
@@ -22,7 +23,9 @@ template NAV
         && nav >= 0.0
         && totalShares >= 0.0
         && (totalShares > 0.0 || nav == 0.0)
-        && pricePerShare nav totalShares > 0.0
+        && nav <= pricingLimit && totalShares <= pricingLimit
+        -- Redemptions are always priced above zero.
+        && redeemSharePrice nav totalShares > 0.0
 
     -- Updates retain this identity; the manager must avoid duplicate initial snapshots.
     key (manager, vaultId) : VaultKey
@@ -45,8 +48,29 @@ template NAV
           totalShares = newTotalShares
           updatedAt = now
 
--- Empty vaults start at one unit per share. The invariant requires zero NAV
--- at zero supply and a positive price for funded vaults.
+-- Pricing multiplies price by supply exactly in Numeric 20, which holds values
+-- below 1e18; bounding NAV and supply keeps that product in range.
+pricingLimit : Decimal
+pricingLimit = 100_000_000_000_000_000.0
+
+-- Empty vaults start at one unit per share. The view reports this price rounded
+-- to nearest; deposits and redemptions use the directed prices below.
 pricePerShare : Decimal -> Decimal -> Decimal
 pricePerShare nav totalShares =
   if totalShares == 0.0 then 1.0 else nav / totalShares
+
+-- Deposits round the price up and redemptions round it down, so rounding never
+-- moves value away from outstanding shares. The checks compare exact products.
+depositSharePrice : Decimal -> Decimal -> Decimal
+depositSharePrice nav totalShares =
+  let price = pricePerShare nav totalShares
+  in if Numeric.mul @20 price totalShares < Numeric.cast @20 nav
+    then price + 0.0000000001
+    else price
+
+redeemSharePrice : Decimal -> Decimal -> Decimal
+redeemSharePrice nav totalShares =
+  let price = pricePerShare nav totalShares
+  in if Numeric.mul @20 price totalShares > Numeric.cast @20 nav
+    then price - 0.0000000001
+    else price

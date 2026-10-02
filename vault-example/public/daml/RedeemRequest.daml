@@ -4,6 +4,7 @@
 module RedeemRequest where
 
 import DA.List (dedup)
+import DA.Numeric qualified as Numeric
 import DA.Foldable (forA_)
 import DA.TextMap qualified as TextMap
 import Splice.Api.Token.AllocationInstructionV2
@@ -55,6 +56,10 @@ template RedeemRequest
         assertMsg "vault does not match redeem request" (vault.manager == manager && vault.vaultId == vaultId)
         assertMsg "redeem quote must leave a positive payout"
           (quote.amount > 0.0 && quote.sharePrice > 0.0 && quote.fee >= 0.0 && quote.fee < quote.amount)
+        -- Every redeem handler pays at least shares times its quoted price, rounded
+        -- down; the holder's side verifies it without seeing NAV.
+        assertMsg "redeem amount is below the quoted price"
+          (quote.amount >= redemptionAmount shares quote.sharePrice)
         validateRedeemFunding this
         holdings <- forA treasuryHoldingCids (\cid -> view <$> fetch cid)
         assertMsg "treasury holdings must be unique and cover the payout"
@@ -140,6 +145,14 @@ template RedeemRequest
       with extraArgs : ExtraArgs
       controller manager
       do exercise allocationCid Allocation_Cancel with actors = [manager]; extraArgs
+
+-- Floor the payout at the quoted price; the remainder stays in the vault.
+-- Numeric 20 holds the exact product for payouts below 1e18.
+redemptionAmount : Decimal -> Decimal -> Decimal
+redemptionAmount shares sharePrice =
+  let exact = Numeric.mul @20 shares sharePrice
+      rounded = Numeric.castAndRound @10 exact
+  in if Numeric.cast @20 rounded > exact then rounded - 0.0000000001 else rounded
 
 -- Bind the request to its reserved share lot and fixed burn authorization.
 validateRedeemFunding : RedeemRequest -> Update ()

@@ -49,6 +49,16 @@ example.
    1.036 less the fee of 1 and updates `NAV`; `ConsumeRedeem` pays 517 to the
    depositor and 1 to the fee treasury, then burns the reserved lot.
 
+Share prices are rounded to ten decimals in the vault's favor: deposits use
+NAV per share rounded up and redemptions use it rounded down, and a partial
+redemption pays shares times that price rounded down. Rounding remainders stay
+with the outstanding shares, so a partial redemption receives less than its
+exact pro-rata value by under (shares + 1) × 1e-10, and the last redemption
+receives the remaining NAV. The public settlement checks each payout against
+its quoted price. `NAV` reports the price rounded to nearest. It rejects
+valuations whose redemption price would round to zero, and caps NAV and supply
+at 1e17 so pricing stays exact.
+
 The feature tests under `Onboarding/`, `Valuation/`, `Deposit/`, `Redeem/`,
 and `Investment/` cover each step in isolation, including a failed asset
 delivery that rolls back the cash payment.

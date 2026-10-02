@@ -1,0 +1,28 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Fixtures.Failures where
+
+import Daml.Script
+
+-- Negative tests check why a submission fails, so they cannot pass for the wrong reason.
+
+-- Error ID reported when a template's ensure clause rejects a contract.
+preconditionFailed : Text
+preconditionFailed = "UNHANDLED_EXCEPTION/DA.Exception.PreconditionFailed:PreconditionFailed"
+
+submitMustViolateEnsure : Party -> Commands a -> Script ()
+submitMustViolateEnsure party cmds = do
+  result <- trySubmit party cmds
+  case result of
+    Left (FailureStatusError status) | status.errorId == preconditionFailed -> pure ()
+    Left err -> abort ("expected an ensure violation, got: " <> show err)
+    Right _ -> abort "expected an ensure violation, but the submission succeeded"
+
+submitMustFailWithMessage : Party -> Text -> Commands a -> Script ()
+submitMustFailWithMessage party expected cmds = do
+  result <- trySubmit party cmds
+  case result of
+    Left (FailureStatusError status) | status.message == expected -> pure ()
+    Left err -> abort ("expected failure '" <> expected <> "', got: " <> show err)
+    Right _ -> abort ("expected failure '" <> expected <> "', but the submission succeeded")

@@ -7,11 +7,14 @@ import Daml.Script
 import Splice.Api.Token.HoldingV2
 
 import Fixtures.Assets
+import Fixtures.Failures
 import FlatFee
 import IFee
 import IRedeemHandler
+import IVault (IVault)
 import NAV
 import RedeemHandler
+import RedeemRequest (ConsumeRedeem(..))
 import Share
 import ShareRegistry
 import USDCx (USDCxHolding(..), USDCxRegistry(..))
@@ -76,6 +79,104 @@ redeem = script do
   None <- queryInterfaceContractId depositor request.allocationCid
   None <- queryInterfaceContractId depositor lockedCid
   pure ()
+
+redeemAfterRevaluation : Script ()
+redeemAfterRevaluation = script do
+  -- A ten-decimal valuation makes the exact price 1.234567890163 per share, which
+  -- rounds to nearest 1.2345678902 but is quoted rounded down for redemptions.
+  RedeemSetup{..} <- setupRedeem ()
+  let manager = vault.manager
+  Some (navCid, _) <- queryByKey @NAV manager (manager, vault.vaultId)
+  _ <- submit manager $ exerciseCmd navCid UpdateNAV with newNav = 123.4567890163; newTotalShares = 100.0
+  Some registryDisclosure <- queryDisclosure manager shareRegistryCid
+  requested <- submit (actAs depositor <> disclose registryDisclosure) $ exerciseCmd shareCid Redeem with
+    sharesToRedeem = 40.0
+    shareRegistryCid = toInterfaceContractId shareRegistryCid
+
+  -- At 1.2345678901, 40 shares pay 49.382715604, below the exact 49.38271560652.
+  result <- submit manager $ exerciseCmd vaultCid HandleRedeem with
+    requestCid = requested.requestCid
+    handlerCid
+    treasuryHoldingCids = [treasuryHoldingCid]
+    allocationFactoryCid = testAllocationFactoryCid registry
+    settlementFactoryCid = testSettlementFactoryCid registry
+    extraArgs = emptyExtraArgs
+  assertMsg "redeem pays shares at the floored price"
+    (result.sharePrice == 1.2345678901 && result.amount == 49.382715604
+      && result.fee == 1.0 && result.receivedAmount == 48.382715604)
+
+  -- The rounding remainder stays with the 60 outstanding shares.
+  Some (_, nav) <- queryByKey @NAV manager (manager, vault.vaultId)
+  assertMsg "NAV keeps the rounding remainder"
+    (nav.nav == 74.0740734123 && nav.totalShares == 60.0)
+
+redeemFractionalShares : Script ()
+redeemFractionalShares = script do
+  -- 33.3333333333 shares at 1.2 are worth 39.99999999996; the floored payout of
+  -- 39.9999999999 still passes the public check against the quoted price.
+  RedeemSetup{..} <- setupRedeem ()
+  let manager = vault.manager
+  Some registryDisclosure <- queryDisclosure manager shareRegistryCid
+  requested <- submit (actAs depositor <> disclose registryDisclosure) $ exerciseCmd shareCid Redeem with
+    sharesToRedeem = 33.3333333333
+    shareRegistryCid = toInterfaceContractId shareRegistryCid
+  result <- submit manager $ exerciseCmd vaultCid HandleRedeem with
+    requestCid = requested.requestCid
+    handlerCid
+    treasuryHoldingCids = [treasuryHoldingCid]
+    allocationFactoryCid = testAllocationFactoryCid registry
+    settlementFactoryCid = testSettlementFactoryCid registry
+    extraArgs = emptyExtraArgs
+  assertMsg "fractional shares pay the floored amount"
+    (result.sharePrice == 1.2 && result.amount == 39.9999999999 && result.receivedAmount == 38.9999999999)
+  Some (_, nav) <- queryByKey @NAV manager (manager, vault.vaultId)
+  assertMsg "NAV keeps the rounding remainder"
+    (nav.nav == 80.0000000001 && nav.totalShares == 66.6666666667)
+
+redeemWholeSupplyAtUnevenPrice : Script ()
+redeemWholeSupplyAtUnevenPrice = script do
+  -- 119.9999999999 over 100 shares quotes 1.1999999999; the last holder still
+  -- receives the whole NAV, above the 119.99999999 the quoted price implies.
+  RedeemSetup{..} <- setupRedeem ()
+  let manager = vault.manager
+  Some (navCid, _) <- queryByKey @NAV manager (manager, vault.vaultId)
+  _ <- submit manager $ exerciseCmd navCid UpdateNAV with newNav = 119.9999999999; newTotalShares = 100.0
+  Some registryDisclosure <- queryDisclosure manager shareRegistryCid
+  requested <- submit (actAs depositor <> disclose registryDisclosure) $ exerciseCmd shareCid Redeem with
+    sharesToRedeem = 100.0
+    shareRegistryCid = toInterfaceContractId shareRegistryCid
+  result <- submit manager $ exerciseCmd vaultCid HandleRedeem with
+    requestCid = requested.requestCid
+    handlerCid
+    treasuryHoldingCids = [treasuryHoldingCid]
+    allocationFactoryCid = testAllocationFactoryCid registry
+    settlementFactoryCid = testSettlementFactoryCid registry
+    extraArgs = emptyExtraArgs
+  assertMsg "the last holder receives the remaining NAV"
+    (result.sharePrice == 1.1999999999 && result.amount == 119.9999999999
+      && result.receivedAmount == 118.9999999999)
+  Some (_, nav) <- queryByKey @NAV manager (manager, vault.vaultId)
+  assertMsg "the vault is empty" (nav.nav == 0.0 && nav.totalShares == 0.0)
+
+redeemSettlementChecksQuote : Script ()
+redeemSettlementChecksQuote = script do
+  RedeemSetup{..} <- setupRedeem ()
+  let manager = vault.manager
+  Some registryDisclosure <- queryDisclosure manager shareRegistryCid
+  requested <- submit (actAs depositor <> disclose registryDisclosure) $ exerciseCmd shareCid Redeem with
+    sharesToRedeem = 40.0
+    shareRegistryCid = toInterfaceContractId shareRegistryCid
+
+  -- Public settlement binds the payout to the quoted price: 40 shares at 1.2 owe at
+  -- least 48, so one unit of 1e-10 less is rejected.
+  submitMustFailWithMessage manager "redeem amount is below the quoted price" $
+    exerciseCmd requested.requestCid ConsumeRedeem with
+      vaultCid = toInterfaceContractId @IVault vaultCid
+      quote = RedeemQuote with amount = 47.9999999999; fee = 1.0; sharePrice = 1.2
+      treasuryHoldingCids = [treasuryHoldingCid]
+      allocationFactoryCid = testAllocationFactoryCid registry
+      settlementFactoryCid = testSettlementFactoryCid registry
+      extraArgs = emptyExtraArgs
 
 data RedeemSetup = RedeemSetup with
   vault : Vault
