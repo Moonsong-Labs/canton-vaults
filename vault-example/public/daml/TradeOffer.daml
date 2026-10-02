@@ -18,6 +18,11 @@ data AssetFactories = AssetFactories with
   settlementFactoryCid : ContractId SettlementFactory
     deriving (Eq, Show)
 
+-- The manager fetches every counterparty holding at execution, so the
+-- counterparty cannot make that transaction arbitrarily large.
+maxOfferHoldings : Int
+maxOfferHoldings = 100
+
 -- The counterparty commits to exact terms and factory contracts. Its holdings
 -- remain spendable until execution, so an unavailable holding invalidates the trade.
 template TradeOffer
@@ -39,6 +44,7 @@ template TradeOffer
       && terms.asset /= terms.currency
       && terms.quantity > 0.0 && terms.unitPrice > 0.0 && tradeAmount terms > 0.0
       && not (null counterpartyHoldingCids)
+      && length counterpartyHoldingCids <= maxOfferHoldings
 
     interface instance ITradeOffer for TradeOffer where
       view = TradeOfferInfo with vaultId, manager, terms, expiresAt

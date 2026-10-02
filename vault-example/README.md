@@ -33,11 +33,12 @@ example.
    and updates `NAV`; `DepositRequest.Consume` then settles 1,000 to the
    treasury and 1 to the fee treasury, mints the `Share`, and records the
    mint event in `ShareRegistry`.
-3. **Investment.** A counterparty signs a `TradeOffer` for each asset. The
-   manager exercises `Vault.Buy`; the private `TradeHandler` checks the offer
-   against the allowed assets and trade limit, then `ExecuteTrade` settles the
-   cash and asset legs together. The vault ends with 4 treasury fund units,
-   6 credit fund units, 1 property fund unit, and 100 USDCx.
+3. **Investment.** A counterparty signs a `TradeOffer` for each asset, listing
+   at most 100 holdings to fund it. The manager exercises `Vault.Buy`; the
+   private `TradeHandler` checks the offer against the allowed assets and trade
+   limit, then `ExecuteTrade` settles the cash and asset legs together. The
+   vault ends with 4 treasury fund units, 6 credit fund units, 1 property fund
+   unit, and 100 USDCx.
 4. **Valuation.** The manager exercises `UpdateNAV` with the revalued
    portfolio. NAV becomes 1,036 for 1,000 shares, so the share price is
    1.036. Selling 2 treasury units and the property unit through `Vault.Sell`
