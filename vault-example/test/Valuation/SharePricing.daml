@@ -1,0 +1,195 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module Valuation.SharePricing where
+
+import Daml.Script
+import DA.Numeric qualified as Numeric
+import DamlProps.Gen
+import DamlProps.Property
+import DamlProps.Runner
+import DamlProps.Seed (mkSeed)
+import DamlProps.Sequence (stepPayloads)
+
+import DepositHandler (priceDeposit)
+import NAV (depositSharePrice, minSharePrice, pricingLimit, redeemSharePrice)
+import RedeemHandler (priceRedemption)
+import RedeemRequest (redemptionAmount)
+
+-- Property tests for the pricing used by DepositHandler and RedeemHandler.
+-- Rounding must always favor the shares already outstanding.
+
+data Valuation = Valuation with
+  nav : Decimal
+  totalShares : Decimal
+    deriving (Eq, Show)
+
+ulp : Decimal
+ulp = 0.0000000001
+
+-- Exact product of two Decimals; the generators keep products below 1e18.
+exact : Decimal -> Decimal -> Numeric 20
+exact = Numeric.mul
+
+-- Mirrors the NAV ensure clause; Valuation.NAV checks it on the ledger.
+navEnsureHolds : Valuation -> Bool
+navEnsureHolds v = v.nav >= 0.0 && v.totalShares >= 0.0
+  && (v.totalShares > 0.0 || v.nav == 0.0)
+  && v.nav <= pricingLimit && v.totalShares <= pricingLimit
+  && redeemSharePrice v.nav v.totalShares >= minSharePrice
+
+-- Log-uniform magnitudes: a mantissa in [1, 10) times 10^e for e in [lo, hi].
+genMagnitude : Int -> Int -> Gen Decimal
+genMagnitude lo hi = genBind (genInt lo hi) $ \e ->
+  genMap (\m -> if e >= 0 then m * 10.0 ^ e else m / 10.0 ^ negate e) (genDecimal 1.0 10.0)
+
+genValuationIn : Int -> Int -> Int -> Int -> Gen Valuation
+genValuationIn sharesLo sharesHi priceLo priceHi = genFilter 100 navEnsureHolds $
+  genBind (genMagnitude sharesLo sharesHi) $ \totalShares ->
+    genMap (\price -> Valuation with nav = totalShares * price; totalShares) (genMagnitude priceLo priceHi)
+
+-- Supplies up to 1e7 and prices from the 1e-6 floor to 1e3, plus edge cases at the
+-- floor and prices that divide exactly.
+genValuation : Gen Valuation
+genValuation = genFrequency
+  [ (9, genValuationIn (-6) 6 (-6) 2)
+  , (1, genElement
+      [ Valuation with nav = 0.001; totalShares = 1000.0
+      , Valuation with nav = 0.0015; totalShares = 1000.0
+      , Valuation with nav = 1.9999999; totalShares = 1_000_000.0
+      , Valuation with nav = 1.0; totalShares = 0.0000003
+      , Valuation with nav = 100_000_000_000_000_000.0; totalShares = 0.0000000003
+      , Valuation with nav = 1200.0; totalShares = 1000.0
+      , Valuation with nav = 1036.0; totalShares = 1000.0 ]) ]
+
+-- Partial redemptions, plus the last holder redeeming the whole supply.
+genRedemption : Gen (Valuation, Decimal)
+genRedemption = genBind genValuation $ \v -> genFrequency
+  [ (4, genMap (\fraction -> (v, max ulp (min (v.totalShares - ulp) (v.totalShares * fraction))))
+      (genDecimal 0.0 1.0))
+  , (1, genPure (v, v.totalShares)) ]
+
+forAllShow : Show a => Text -> Gen a -> (a -> Bool) -> Script ()
+forAllShow label gen prop =
+  case forAllWith (defaultConfig with numTests = 500) label gen prop of
+    PropSuccess _ -> pure ()
+    PropFailure _ seed _ -> abort (label <> " failed for " <> show (fst (gen.run (mkSeed seed))))
+
+depositPriceRoundsUp : Script ()
+depositPriceRoundsUp = forAllShow "deposit price is the ceiling of NAV per share" genValuation $ \v ->
+  let price = depositSharePrice v.nav v.totalShares
+  in exact price v.totalShares >= Numeric.cast v.nav
+    && exact (price - ulp) v.totalShares < Numeric.cast v.nav
+
+redeemPriceRoundsDown : Script ()
+redeemPriceRoundsDown = forAllShow "redeem price is the floor of NAV per share" genValuation $ \v ->
+  let price = redeemSharePrice v.nav v.totalShares
+  in exact price v.totalShares <= Numeric.cast v.nav
+    && exact (price + ulp) v.totalShares > Numeric.cast v.nav
+
+depositNeverDilutes : Script ()
+depositNeverDilutes = forAllShow "deposits never lower the value of existing shares"
+  (genPair genValuation (genMagnitude (-2) 6)) $ \(v, amount) ->
+    let (_, shares) = priceDeposit v.nav v.totalShares amount
+    -- (nav + amount) / (totalShares + shares) >= nav / totalShares
+    in shares <= 0.0 || exact amount v.totalShares >= exact v.nav shares
+
+redemptionIsFlooredAtQuote : Script ()
+redemptionIsFlooredAtQuote = forAllShow "redemption pays shares times price rounded down" genRedemption $
+  \(v, shares) ->
+    let payout = redemptionAmount shares (redeemSharePrice v.nav v.totalShares)
+        owed = exact shares (redeemSharePrice v.nav v.totalShares)
+    in exact payout 1.0 <= owed && exact (payout + ulp) 1.0 > owed
+
+redemptionNeverOverpays : Script ()
+redemptionNeverOverpays = forAllShow "redemption never pays more than the pro-rata NAV" genRedemption $
+  \(v, shares) ->
+    let (_, payout) = priceRedemption v.nav v.totalShares shares
+    in exact payout v.totalShares <= exact shares v.nav
+
+-- Quotes have a positive price and pay at least shares times that price rounded
+-- down, as RedeemRequest checks; the last holder always receives a positive amount.
+redemptionQuotesHonorPrice : Script ()
+redemptionQuotesHonorPrice = forAllShow "redemption quotes honor their price" genRedemption $
+  \(v, shares) ->
+    let (price, payout) = priceRedemption v.nav v.totalShares shares
+    in price > 0.0 && payout >= redemptionAmount shares price
+      && (shares /= v.totalShares || payout > 0.0)
+
+-- Large vaults stay redeemable: pricing never multiplies shares by NAV.
+quotesAtScale : Script ()
+quotesAtScale = forAllShow "quotes stay computable for vaults up to 1e17 NAV"
+  (genBind (genValuationIn 6 13 (-4) 2) $ \v -> genMap (\f -> (v, v.totalShares * f)) (genDecimal 0.001 1.0)) $
+  \(v, shares) ->
+    let (redeemPrice, payout) = priceRedemption v.nav v.totalShares shares
+        (_, issued) = priceDeposit v.nav v.totalShares 1_000_000.0
+    in redeemPrice > 0.0 && payout >= 0.0 && payout <= v.nav && issued >= 0.0
+
+redemptionAtScale : Script ()
+redemptionAtScale = do
+  let (_, payout) = priceRedemption 12_345_678_901.2345678901 10_000_000_000.0 1_000_000_000.0
+  assertMsg "a 10% redemption of a 12bn vault pays its floored share" (payout == 1_234_567_890.1)
+
+-- Deposits, redemptions and revaluations in any order keep the NAV ensure clause
+-- satisfied, so redemptions stay priced above zero; deposits and redemptions never lower
+-- the value of a share.
+data PricingStep = DepositStep Decimal | RedeemStep Decimal | Revalue Decimal
+  deriving (Eq, Show)
+
+genStep : Gen PricingStep
+genStep = genFrequency
+  [ (4, genMap DepositStep (genMagnitude (-2) 5))
+  , (3, genMap RedeemStep (genDecimal 0.01 0.99))
+  , (1, genPure (RedeemStep 1.0))
+  , (2, genMap Revalue (genDecimal 0.5 1.5))
+  , (1, genMap Revalue (genMagnitude (-12) (-1))) ]
+
+-- The previous valuation is kept to compare share value across each step.
+type Model = (Valuation, Valuation)
+
+-- Steps the ledger would reject leave the valuation unchanged.
+applyStep : Model -> PricingStep -> Either Text Model
+applyStep (_, v) step = case step of
+  DepositStep amount ->
+    let (_, shares) = priceDeposit v.nav v.totalShares amount
+        next = Valuation with nav = v.nav + amount; totalShares = v.totalShares + shares
+    in if shares <= 0.0 || next.nav > pricingLimit || next.totalShares > pricingLimit then Right (v, v)
+      else Right (v, next)
+  RedeemStep fraction
+    | v.totalShares == 0.0 -> Right (v, v)
+    | otherwise ->
+      let shares = if fraction == 1.0 then v.totalShares else v.totalShares * fraction
+          (_, payout) = priceRedemption v.nav v.totalShares shares
+      in if shares <= 0.0 || payout <= 0.0 then Right (v, v)
+        else Right (v, Valuation with nav = v.nav - payout; totalShares = v.totalShares - shares)
+  Revalue factor
+    | v.totalShares == 0.0 -> Right (v, v)
+    | otherwise ->
+      let revalued = v with nav = v.nav * factor
+      in if navEnsureHolds revalued then Right (revalued, revalued) else Right (v, v)
+
+modelInvariants : Model -> Either Text ()
+modelInvariants (before, after)
+  | not (navEnsureHolds after) = Left ("NAV ensure violated: " <> show after)
+  | before.totalShares > 0.0 && after.totalShares > 0.0 && shareValueDropped before after
+      = Left ("share value dropped: " <> show before <> " to " <> show after)
+  | otherwise = Right ()
+
+-- nav' / ts' < nav / ts, compared exactly while the products fit Numeric 20 and at
+-- ten decimals beyond that; rounding is monotone, so it never reports a false drop.
+shareValueDropped : Valuation -> Valuation -> Bool
+shareValueDropped before after
+  | lhs < 1e17 && rhs < 1e17 = exact after.nav before.totalShares < exact before.nav after.totalShares
+  | otherwise = lhs < rhs
+  where
+    lhs = after.nav * before.totalShares
+    rhs = before.nav * after.totalShares
+
+sequencesKeepShareValue : Script ()
+sequencesKeepShareValue = do
+  let empty = Valuation with nav = 0.0; totalShares = 0.0
+      config = (defaultRunnerConfig "share value") with numTests = 200; maxSequenceLength = 25
+  case runProp config genStep applyStep modelInvariants (empty, empty) of
+    AllPassed _ _ -> pure ()
+    FoundFailure detail -> abort (detail.fdFailure.invariantError
+      <> " after " <> show (stepPayloads detail.fdMinimalSequence))
