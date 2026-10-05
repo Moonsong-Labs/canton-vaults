@@ -3,12 +3,6 @@
 # longer occurs. Add an entry only after reviewing the finding; record why it is
 # not a defect in the comment above its group.
 
-# An empty list fails the downstream checks that the holdings cover the amount
-# (TradeOffer.settleTransfer and RedeemRequest.ConsumeRedeem).
-HIGH missing-positive-amount vault-example/public/daml/Vault.daml: Choice 'Buy' accepts list parameter 'treasuryHoldingCids' but has no minimum-length check.
-HIGH missing-positive-amount vault-example/public/daml/Vault.daml: Choice 'HandleRedeem' accepts list parameter 'treasuryHoldingCids' but has no minimum-length check.
-HIGH missing-positive-amount vault-example/public/daml/Vault.daml: Choice 'Sell' accepts list parameter 'treasuryHoldingCids' but has no minimum-length check.
-
 # Identifiers, names and party lists chosen by a signatory of the contract. The one
 # counterparty-signed template, TradeOffer, caps its holdings list, and executing it
 # checks vaultId against the vault, so an oversized ID only fails that trade.
