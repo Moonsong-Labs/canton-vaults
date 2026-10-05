@@ -3,6 +3,9 @@
 
 module TradeHandler where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength, maxAllowedAssets)
+
 import ITradeHandler
 import ITradeOffer
 import Splice.Api.Token.HoldingV2 (InstrumentId)
@@ -15,7 +18,8 @@ template TradeHandler
     maxTradeAmount : Decimal
   where
     signatory manager
-    ensure vaultId /= "" && maxTradeAmount > 0.0
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && maxTradeAmount > 0.0
+      && length allowedAssets <= maxAllowedAssets
 
     interface instance ITradeHandler for TradeHandler where
       view = TradeHandlerInfo with vaultId, manager

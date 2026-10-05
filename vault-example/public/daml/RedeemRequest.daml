@@ -3,6 +3,9 @@
 
 module RedeemRequest where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import DA.List (dedup)
 import DA.Numeric qualified as Numeric
 import DA.Foldable (forA_)
@@ -36,7 +39,7 @@ template RedeemRequest
   where
     signatory depositor
     observer manager
-    ensure vaultId /= "" && shares > 0.0
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && shares > 0.0
       && settlement.executors == [manager] && settlement.id == "vault-redeem"
       && settlement.cid /= None
 

@@ -3,6 +3,9 @@
 
 module AccessAttestation where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import DA.List (dedup)
 
 import IAccessAttestation
@@ -20,6 +23,7 @@ template AccessAttestation
     ensure
       evidenceHash /= Some ""
         && all (/= "") vaultIds
+        && all (\vaultId -> Text.length vaultId <= maxVaultIdLength) vaultIds
         && length vaultIds == length (dedup vaultIds)
 
     interface instance IAccessAttestation for AccessAttestation where

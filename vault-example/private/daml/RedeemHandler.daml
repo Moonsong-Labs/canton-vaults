@@ -3,6 +3,9 @@
 
 module RedeemHandler where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import IFee
 import IRedeemHandler
 import NAV
@@ -16,7 +19,7 @@ template RedeemHandler
     feeCid : ContractId IFee
   where
     signatory manager
-    ensure vaultId /= ""
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength
 
     interface instance IRedeemHandler for RedeemHandler where
       view = RedeemHandlerInfo with vaultId, manager

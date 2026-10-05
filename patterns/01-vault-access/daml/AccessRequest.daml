@@ -5,6 +5,8 @@ module AccessRequest where
 
 import AttestationInfo
 import VaultAccess
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
 
 -- The depositor-led path to a permission. The depositor asks, the manager
 -- decides. Accepting creates the same VaultAccess the manager could have
@@ -17,7 +19,7 @@ template AccessRequest
   where
     signatory depositor
     observer manager
-    ensure vaultId /= ""
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength
 
     choice Cancel : ()
       controller depositor

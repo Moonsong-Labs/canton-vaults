@@ -3,6 +3,9 @@
 
 module Share where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import Splice.Api.Token.HoldingV2 (Account(..), Holding, HoldingView(..), InstrumentId(..))
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
 
@@ -27,7 +30,7 @@ template Share
     shares : Decimal
   where
     signatory manager, depositor
-    ensure uuid /= "" && shares > 0.0
+    ensure uuid /= "" && Text.length uuid <= maxVaultIdLength && shares > 0.0
 
     interface instance Holding for Share where
       view = shareHoldingView this

@@ -3,6 +3,9 @@
 
 module VaultAccess where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import DepositRequest
 import IDepositHandler
 
@@ -14,7 +17,7 @@ template VaultAccess
   where
     signatory manager
     observer depositor
-    ensure vaultId /= ""
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength
 
     nonconsuming choice Deposit : ContractId DepositRequest
       with

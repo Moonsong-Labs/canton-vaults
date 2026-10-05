@@ -3,6 +3,9 @@
 
 module Share (module Share, shareInstrumentId, shareAccount) where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import DA.Map qualified as Map
 import DA.TextMap qualified as TextMap
 import Splice.Api.Token.AllocationV2
@@ -27,7 +30,7 @@ template Share
     lock : Optional Lock
   where
     signatory manager, depositor
-    ensure vaultId /= "" && shares > 0.0
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && shares > 0.0
 
     interface instance Holding for Share where
       view = HoldingView with
@@ -96,7 +99,7 @@ template ShareAllocation
     createdAt : Time
   where
     signatory manager, depositor
-    ensure vaultId /= "" && shares > 0.0 && settlement.executors == [manager]
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && shares > 0.0 && settlement.executors == [manager]
       && settlement.id == "vault-redeem" && settlement.cid /= None
 
     interface instance Allocation for ShareAllocation where

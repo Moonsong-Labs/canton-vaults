@@ -5,6 +5,7 @@ module DepositRequest where
 
 import DA.Foldable (forA_)
 import DA.TextMap qualified as TextMap
+import DA.Text qualified as Text
 
 import Splice.Api.Token.AllocationV2
 import Splice.Api.Token.HoldingV2
@@ -13,6 +14,7 @@ import Splice.Api.Token.MetadataV1
 import AttestationInfo
 import DepositInfo
 import Share
+import VaultLimits (maxVaultIdLength)
 
 depositSettlementId : Text
 depositSettlementId = "vault-deposit"
@@ -38,6 +40,7 @@ template DepositRequest
     signatory manager, depositor
     ensure
       vaultId /= ""
+        && Text.length vaultId <= maxVaultIdLength
         && instrumentId.id /= ""
         && amount > 0.0
         && settlement.executors == [manager]

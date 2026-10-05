@@ -3,6 +3,9 @@
 
 module Vault where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength, maxVaultNameLength)
+
 import IAccessAttestation
 import IVault
 import VaultAccess (VaultAccess(..))
@@ -26,7 +29,7 @@ template Vault
     feeTreasury : Account
   where
     signatory manager
-    ensure vaultId /= "" && name /= "" && acceptedInstrument.id /= ""
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && name /= "" && Text.length name <= maxVaultNameLength && acceptedInstrument.id /= ""
       && treasury.owner == Some manager
       && feeTreasury.owner == Some manager && feeTreasury /= treasury
 
