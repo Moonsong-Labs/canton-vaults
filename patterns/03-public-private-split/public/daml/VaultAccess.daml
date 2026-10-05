@@ -21,6 +21,7 @@ template VaultAccess
         amount : Decimal
       controller depositor
       do
+        assertMsg "deposit amount must be positive" (amount > 0.0)
         create DepositRequest with manager; depositor; vaultId; amount
 
     -- Contract observers do not witness this nonconsuming, manager-controlled
