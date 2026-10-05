@@ -63,6 +63,8 @@ template Vault
         extraArgs : ExtraArgs
       controller manager
       do
+        assertMsg "buy requires treasury holdings"
+          (not (null treasuryHoldingCids))
         handler <- fetchTradeHandler this handlerCid
         handleTrade handler (toInterfaceContractId @IVault self) BuyAsset offerCid treasuryHoldingCids extraArgs
 
@@ -74,6 +76,8 @@ template Vault
         extraArgs : ExtraArgs
       controller manager
       do
+        assertMsg "sell requires asset holdings"
+          (not (null treasuryHoldingCids))
         handler <- fetchTradeHandler this handlerCid
         handleTrade handler (toInterfaceContractId @IVault self) SellAsset offerCid treasuryHoldingCids extraArgs
 
@@ -89,6 +93,8 @@ template Vault
         extraArgs : ExtraArgs
       controller manager
       do
+        assertMsg "redemption requires treasury holdings"
+          (not (null treasuryHoldingCids))
         request <- fetch requestCid
         assertMsg "redeem request belongs to another vault" (request.manager == manager && request.vaultId == vaultId)
         -- Require this vault's allocation implementation before approving a burn.
