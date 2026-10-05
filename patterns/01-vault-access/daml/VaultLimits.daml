@@ -1,0 +1,8 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module VaultLimits (maxVaultIdLength) where
+
+-- Shared character limit for vault IDs, including Share.uuid, which stores the vault ID.
+maxVaultIdLength : Int
+maxVaultIdLength = 128
