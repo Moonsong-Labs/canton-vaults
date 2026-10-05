@@ -2,6 +2,3 @@
 # `make lint` fails when a finding is missing from this list or an entry here no
 # longer occurs. Add an entry only after reviewing the finding; record why it is
 # not a defect in the comment above its group.
-
-# Fee tiers are configured by the manager who signs TieredFee.
-MEDIUM unbounded-fields patterns/02-pluggable-component/daml/TieredFee.daml: Template 'TieredFee' has unbounded List field 'tiers' with no ensure clause bounding their length.
