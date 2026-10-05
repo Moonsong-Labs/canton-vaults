@@ -4,9 +4,11 @@
 module AccessAttestation where
 
 import DA.List (dedup)
+import DA.Text qualified as Text
 
 import AttestationInfo
 import AccessRequest (AccessRequest(..))
+import VaultLimits (maxVaultIdLength)
 
 -- The manager's KYB approval for one depositor, scoped to a list of vaults.
 -- Supporting evidence stays off-ledger.
@@ -22,6 +24,7 @@ template AccessAttestation
     ensure
       evidenceHash /= Some ""
         && all (/= "") vaultIds
+        && all (\vaultId -> Text.length vaultId <= maxVaultIdLength) vaultIds
         && length vaultIds == length (dedup vaultIds)
 
     interface instance AttestationInfo for AccessAttestation where

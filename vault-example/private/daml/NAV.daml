@@ -3,6 +3,9 @@
 
 module NAV where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength, maxAuditors)
+
 import DA.Numeric qualified as Numeric
 import IVault (VaultKey)
 import INAV
@@ -20,6 +23,8 @@ template NAV
     observer auditors
     ensure
       vaultId /= ""
+        && Text.length vaultId <= maxVaultIdLength
+        && length auditors <= maxAuditors
         && nav >= 0.0
         && totalShares >= 0.0
         && (totalShares > 0.0 || nav == 0.0)

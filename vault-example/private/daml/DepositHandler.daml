@@ -3,6 +3,9 @@
 
 module DepositHandler where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import IDepositHandler
 import IFee
 import NAV
@@ -15,7 +18,7 @@ template DepositHandler
     feeCid : ContractId IFee
   where
     signatory manager
-    ensure vaultId /= ""
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength
 
     interface instance IDepositHandler for DepositHandler where
       view = DepositHandlerInfo with vaultId, manager

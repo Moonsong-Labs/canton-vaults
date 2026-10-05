@@ -3,6 +3,9 @@
 
 module DepositRequest where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 -- The proposal fixes the amount the manager may accept.
 template DepositRequest
   with
@@ -13,7 +16,7 @@ template DepositRequest
   where
     signatory depositor
     observer manager
-    ensure vaultId /= "" && amount > 0.0
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && amount > 0.0
 
     -- The signed request supplies the depositor's authority for the receipt.
     choice Consume : Decimal
@@ -38,4 +41,4 @@ template DepositReceipt
     amount : Decimal
   where
     signatory manager, depositor
-    ensure vaultId /= "" && amount > 0.0
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && amount > 0.0
