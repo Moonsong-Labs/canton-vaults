@@ -94,6 +94,16 @@ depositNeverDilutes = forAllShow "deposits never lower the value of existing sha
     -- (nav + amount) / (totalShares + shares) >= nav / totalShares
     in shares <= 0.0 || exact amount v.totalShares >= exact v.nav shares
 
+-- Issuance must be maximal: one more share unit would exceed the net deposit.
+-- Zero shares are correct only when the amount cannot cover one share unit.
+depositIssuesExactShares : Script ()
+depositIssuesExactShares = forAllShow "deposits issue the maximum shares covered by the net amount"
+  (genPair genValuation (genMagnitude (-2) 6)) $ \(v, netAmount) ->
+    let (price, shares) = priceDeposit v.nav v.totalShares netAmount
+    in shares >= 0.0
+      && exact shares price <= Numeric.cast netAmount
+      && exact (shares + ulp) price > Numeric.cast netAmount
+
 redemptionIsFlooredAtQuote : Script ()
 redemptionIsFlooredAtQuote = forAllShow "redemption pays shares times price rounded down" genRedemption $
   \(v, shares) ->
