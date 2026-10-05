@@ -104,6 +104,16 @@ depositIssuesExactShares = forAllShow "deposits issue the maximum shares covered
       && exact shares price <= Numeric.cast netAmount
       && exact (shares + ulp) price > Numeric.cast netAmount
 
+-- At a price of two, one share unit costs two asset units.
+depositAtMinimumShareBoundary : Script ()
+depositAtMinimumShareBoundary = do
+  assertMsg "below the minimum share cost, issuance rounds to zero"
+    (priceDeposit 200.0 100.0 ulp == (2.0, 0.0))
+  assertMsg "the minimum share cost issues exactly one share unit"
+    (priceDeposit 200.0 100.0 (2.0 * ulp) == (2.0, ulp))
+  assertMsg "a remainder below another share unit does not increase issuance"
+    (priceDeposit 200.0 100.0 (3.0 * ulp) == (2.0, ulp))
+
 redemptionIsFlooredAtQuote : Script ()
 redemptionIsFlooredAtQuote = forAllShow "redemption pays shares times price rounded down" genRedemption $
   \(v, shares) ->
