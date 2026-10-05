@@ -7,6 +7,9 @@ import DA.List (head, last, sort)
 
 import IFee
 
+maxFeeTiers : Int
+maxFeeTiers = 100
+
 template TieredFee
   with
     manager : Party
@@ -15,6 +18,7 @@ template TieredFee
     signatory manager
     ensure
       not (null tiers)
+        && length tiers <= maxFeeTiers
         && fst (head tiers) == 0.0
         && all (\(threshold, rate) -> threshold >= 0.0 && rate >= 0.0 && rate < 1.0) tiers
         && sort (map fst tiers) == map fst tiers
