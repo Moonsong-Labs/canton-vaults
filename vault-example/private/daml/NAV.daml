@@ -61,7 +61,10 @@ minSharePrice = 0.000001
 -- to nearest; deposits and redemptions use the directed prices below.
 pricePerShare : Decimal -> Decimal -> Decimal
 pricePerShare nav totalShares =
-  if totalShares == 0.0 then 1.0 else nav / totalShares
+  if totalShares == 0.0 then 1.0
+  else either error identity do
+    assertMsg "total shares must be positive" (totalShares > 0.0)
+    pure (nav / totalShares)
 
 -- Deposits round the price up and redemptions round it down, so rounding never
 -- moves value away from outstanding shares. The checks compare exact products.
