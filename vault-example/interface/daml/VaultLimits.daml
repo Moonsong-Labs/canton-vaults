@@ -1,0 +1,16 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module VaultLimits (maxVaultIdLength, maxVaultNameLength, maxAuditors, maxAllowedAssets) where
+
+maxVaultIdLength : Int
+maxVaultIdLength = 128
+
+maxVaultNameLength : Int
+maxVaultNameLength = 256
+
+maxAuditors : Int
+maxAuditors = 100
+
+maxAllowedAssets : Int
+maxAllowedAssets = 100
