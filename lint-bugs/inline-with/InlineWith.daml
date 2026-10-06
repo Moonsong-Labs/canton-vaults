@@ -1,0 +1,21 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module InlineWith where
+
+-- BUG: The linter skips the fields when "with" is on the template header line.
+-- EXPECTED: MEDIUM unbounded-fields for "payload", just like WithOnNextLine.
+template WithOnHeader with
+    owner : Party
+    payload : Text
+  where
+    signatory owner
+
+-- CONTROL: The linter correctly reports MEDIUM unbounded-fields for "payload".
+-- Both templates have the same fields; only the placement of "with" differs.
+template WithOnNextLine
+  with
+    owner : Party
+    payload : Text
+  where
+    signatory owner
