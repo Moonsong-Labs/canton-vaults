@@ -1,0 +1,22 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module ColonSpacing where
+
+-- BUG: The linter skips "payload" because there is no space before the colon.
+-- EXPECTED: MEDIUM unbounded-fields; spacing does not change the field's type.
+template WithoutSpace
+  with
+    owner : Party
+    payload: Text
+  where
+    signatory owner
+
+-- CONTROL: The linter correctly reports MEDIUM unbounded-fields for "payload".
+-- Both templates have the same unbounded Text field; only spacing differs.
+template WithSpace
+  with
+    owner : Party
+    payload : Text
+  where
+    signatory owner
