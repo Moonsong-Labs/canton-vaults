@@ -6,6 +6,7 @@ module Investment.InvestmentFlow where
 import Daml.Script
 import DA.Time (addRelTime, hours)
 import Fixtures.Assets (basicAccount, emptyExtraArgs)
+import Fixtures.Failures (submitMustViolateEnsure)
 import ITradeHandler
 import ITradeOffer
 import TradeHandler
@@ -74,6 +75,14 @@ failedDeliveryRollsBack = script do
   [] <- queryInterface @Allocation manager
   [(_, originalAsset)] <- query @Asset.TokenizedAssetHolding counterparty
   assertMsg "seller keeps its unlocked fund units" (originalAsset.amount == 2.0 && originalAsset.lock == None)
+
+offerHoldingsAreCapped : Script ()
+offerHoldingsAreCapped = script do
+  InvestmentSetup{..} <- setupInvestment ()
+  -- The manager fetches every listed holding when executing, so an offer lists at most 100.
+  let listing n = concat (replicate n offer.counterpartyHoldingCids)
+  _ <- submit counterparty $ createCmd offer with counterpartyHoldingCids = listing 100
+  submitMustViolateEnsure counterparty $ createCmd offer with counterpartyHoldingCids = listing 101
 
 data InvestmentSetup = InvestmentSetup with
   vault : Vault

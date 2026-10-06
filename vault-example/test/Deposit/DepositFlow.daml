@@ -22,49 +22,8 @@ import VaultAccess qualified as Access
 
 deposit : Script ()
 deposit = script do
-  -- Parties and accounts: vault capital and manager fees use separate destinations.
-  manager <- allocateParty "Manager"
-  depositor <- allocateParty "Depositor"
-  issuer <- allocateParty "Token issuer"
-  let instrumentId = InstrumentId with admin = issuer; id = "USDCx"
-      vaultId = "treasury-vault"
-      treasury = (basicAccount manager) with id = vaultId
-      feeTreasury = treasury with id = vaultId <> "-fees"
-
-  -- A local token registry supplies CIP-112 holdings and allocation/settlement factories.
-  rulesCid <- submit issuer $ createCmd USDCxRegistry with
-    admin = issuer; instrumentId; observers = [depositor, manager]
-  let registry = USDCxFixture with issuer; instrumentId; allocationFactoryCid = rulesCid
-
-  -- Initial funding gives the depositor enough USDCx for the deposit and change.
-  holdingCid <- issueHolding registry depositor 150.0
-
-  -- Create the vault with its accepted asset and both treasury accounts.
-  vaultCid <- submit manager $ createCmd Vault with
-    vaultId; manager; name = "Treasury Vault"; acceptedInstrument = instrumentId
-    treasury; feeTreasury
-
-  -- Record completed off-ledger onboarding, scoped to this vault.
-  approvalCid <- submit manager $ createCmd Attestation.AccessAttestation with
-    manager; depositor; vaultIds = [vaultId]; evidenceHash = None
-
-  -- GrantAccess validates the attestation and creates the depositor's VaultAccess.
-  -- This permission is the entry point for subsequent deposit requests.
-  accessCid <- submit manager $ exerciseCmd vaultCid GrantAccess with
-    depositor; attestationCid = toInterfaceContractId @IAccessAttestation approvalCid
-
-  -- The share registry records the CIP-112 mint event when the deposit settles.
-  shareRegistryCid <- submit manager $ createCmd ShareRegistry with vaultId; manager
-
-  -- Configure private processing through IFee, using the one-USDCx implementation.
-  feeCid <- submit manager $ createCmd FlatFee with manager
-  handlerCid <- submit manager $ createCmd DepositHandler with
-    vaultId; manager; feeCid = toInterfaceContractId @IFee feeCid
-
-  -- Seed a valuation snapshot: 1,200 USDCx / 1,000 shares sets the price to 1.2.
-  now <- getTime
-  _ <- submit manager $ createCmd NAV with
-    vaultId; manager; nav = 1200.0; totalShares = 1000.0; updatedAt = now; auditors = []
+  -- 1,200 USDCx over 1,000 shares sets the price to 1.2.
+  DepositSetup{..} <- setupDeposit 1200.0 1000.0
 
   -- Deposit reserves 121 USDCx while the request awaits the manager's decision.
   requestCid <- submit depositor $ exerciseCmd accessCid Access.Deposit with
@@ -120,3 +79,91 @@ deposit = script do
   None <- queryInterfaceContractId depositor request.allocationCid
   Some _ <- queryContractId depositor accessCid
   pure ()
+
+depositRoundsPriceUp : Script ()
+depositRoundsPriceUp = script do
+  -- 1,234.5678901234 over 1,000 shares rounds to nearest 1.2345678901, below the
+  -- exact price, so deposits are quoted at 1.2345678902 instead.
+  DepositSetup{..} <- setupDeposit 1234.5678901234 1000.0
+  requestCid <- submit depositor $ exerciseCmd accessCid Access.Deposit with
+    inputHoldingCids = [toInterfaceContractId @Holding holdingCid]
+    amount = 121.0
+    allocationFactoryCid = testAllocationFactoryCid registry
+    extraArgs = emptyExtraArgs
+  result <- submit manager $ exerciseCmd accessCid Access.HandleDeposit with
+    requestCid
+    handlerCid = toInterfaceContractId @IDepositHandler handlerCid
+    settlementFactoryCid = testSettlementFactoryCid registry
+    shareRegistryCid
+    extraArgs = emptyExtraArgs
+
+  -- Net 120 issues 97.2000008687 shares; the nearest price would issue 97.2000008766.
+  assertMsg "deposit is priced rounded up"
+    (result.sharePrice == 1.2345678902 && result.mintedShares == 97.2000008687)
+  Some (_, nav) <- queryByKey @NAV manager (manager, vaultId)
+  assertMsg "NAV adds the net deposit and the issued shares"
+    (nav.nav == 1354.5678901234 && nav.totalShares == 1097.2000008687)
+
+data DepositSetup = DepositSetup with
+  manager : Party
+  depositor : Party
+  vaultId : Text
+  treasury : Account
+  feeTreasury : Account
+  registry : USDCxFixture
+  holdingCid : ContractId USDCxHolding
+  accessCid : ContractId Access.VaultAccess
+  shareRegistryCid : ContractId ShareRegistry
+  handlerCid : ContractId DepositHandler
+    deriving (Eq, Show)
+
+-- Onboard a depositor holding 150 USDCx into a vault valued at `nav` for `totalShares`.
+setupDeposit : Decimal -> Decimal -> Script DepositSetup
+setupDeposit nav totalShares = script do
+  -- Parties and accounts: vault capital and manager fees use separate destinations.
+  manager <- allocateParty "Manager"
+  depositor <- allocateParty "Depositor"
+  issuer <- allocateParty "Token issuer"
+  let instrumentId = InstrumentId with admin = issuer; id = "USDCx"
+      vaultId = "treasury-vault"
+      treasury = (basicAccount manager) with id = vaultId
+      feeTreasury = treasury with id = vaultId <> "-fees"
+
+  -- A local token registry supplies CIP-112 holdings and allocation/settlement factories.
+  rulesCid <- submit issuer $ createCmd USDCxRegistry with
+    admin = issuer; instrumentId; observers = [depositor, manager]
+  let registry = USDCxFixture with issuer; instrumentId; allocationFactoryCid = rulesCid
+
+  -- Initial funding gives the depositor enough USDCx for the deposit and change.
+  holdingCid <- issueHolding registry depositor 150.0
+
+  -- Create the vault with its accepted asset and both treasury accounts.
+  vaultCid <- submit manager $ createCmd Vault with
+    vaultId; manager; name = "Treasury Vault"; acceptedInstrument = instrumentId
+    treasury; feeTreasury
+
+  -- Record completed off-ledger onboarding, scoped to this vault.
+  approvalCid <- submit manager $ createCmd Attestation.AccessAttestation with
+    manager; depositor; vaultIds = [vaultId]; evidenceHash = None
+
+  -- GrantAccess validates the attestation and creates the depositor's VaultAccess.
+  -- This permission is the entry point for subsequent deposit requests.
+  accessCid <- submit manager $ exerciseCmd vaultCid GrantAccess with
+    depositor; attestationCid = toInterfaceContractId @IAccessAttestation approvalCid
+
+  -- The share registry records the CIP-112 mint event when the deposit settles.
+  shareRegistryCid <- submit manager $ createCmd ShareRegistry with vaultId; manager
+
+  -- Configure private processing through IFee, using the one-USDCx implementation.
+  feeCid <- submit manager $ createCmd FlatFee with manager
+  handlerCid <- submit manager $ createCmd DepositHandler with
+    vaultId; manager; feeCid = toInterfaceContractId @IFee feeCid
+
+  -- Seed the valuation snapshot that sets the share price.
+  now <- getTime
+  _ <- submit manager $ createCmd NAV with
+    vaultId; manager; nav; totalShares; updatedAt = now; auditors = []
+
+  pure DepositSetup with
+    manager, depositor, vaultId, treasury, feeTreasury, registry, holdingCid, accessCid
+    shareRegistryCid, handlerCid

@@ -33,11 +33,12 @@ example.
    and updates `NAV`; `DepositRequest.Consume` then settles 1,000 to the
    treasury and 1 to the fee treasury, mints the `Share`, and records the
    mint event in `ShareRegistry`.
-3. **Investment.** A counterparty signs a `TradeOffer` for each asset. The
-   manager exercises `Vault.Buy`; the private `TradeHandler` checks the offer
-   against the allowed assets and trade limit, then `ExecuteTrade` settles the
-   cash and asset legs together. The vault ends with 4 treasury fund units,
-   6 credit fund units, 1 property fund unit, and 100 USDCx.
+3. **Investment.** A counterparty signs a `TradeOffer` for each asset, listing
+   at most 100 holdings to fund it. The manager exercises `Vault.Buy`; the
+   private `TradeHandler` checks the offer against the allowed assets and trade
+   limit, then `ExecuteTrade` settles the cash and asset legs together. The
+   vault ends with 4 treasury fund units, 6 credit fund units, 1 property fund
+   unit, and 100 USDCx.
 4. **Valuation.** The manager exercises `UpdateNAV` with the revalued
    portfolio. NAV becomes 1,036 for 1,000 shares, so the share price is
    1.036. Selling 2 treasury units and the property unit through `Vault.Sell`
@@ -49,6 +50,18 @@ example.
    1.036 less the fee of 1 and updates `NAV`; `ConsumeRedeem` pays 517 to the
    depositor and 1 to the fee treasury, then burns the reserved lot.
 
+Share prices are rounded to ten decimals in the vault's favor: deposits use
+NAV per share rounded up and redemptions use it rounded down, and a partial
+redemption pays shares times that price rounded down. Rounding remainders stay
+with the outstanding shares, so a partial redemption receives less than its
+exact pro-rata value by under (shares + 1) × 1e-10, and the last redemption
+receives the remaining NAV. The public settlement checks each payout against
+its quoted price. `NAV` reports the price rounded to nearest, for display
+only. It rejects valuations whose redemption price would fall below 1e-6, and
+caps NAV and supply at 1e17 so pricing stays exact. Deposits and redemptions
+never lower the price, so these limits can reject a deposit or a revaluation but
+never a redemption.
+
 The feature tests under `Onboarding/`, `Valuation/`, `Deposit/`, `Redeem/`,
 and `Investment/` cover each step in isolation, including a failed asset
 delivery that rolls back the cash payment.
@@ -57,8 +70,11 @@ delivery that rolls back the cash payment.
 
 - Valuation is a manual snapshot set by the manager. No oracle, freshness
   check, or reconciliation with issued shares.
-- The only fee model is a flat fee of one unit, for both deposits and
-  redemptions.
+- The only fee model is a flat fee of one unit, capped at half the amount, for
+  both deposits and redemptions.
+- The manager sets NAV and decides when each request executes. Holders can
+  cancel pending requests, but they cannot set limits on the price or fee they
+  accept, and no exit bypasses the manager.
 - Access is admin-led. The depositor-led request path from the `vault-access`
   pattern is not included.
 - Demo assets do not support cancelling or withdrawing allocations, so

@@ -3,11 +3,10 @@
 
 module RedeemHandler where
 
-import DA.Numeric qualified as Numeric
 import IFee
-import INAV
 import IRedeemHandler
 import NAV
+import RedeemRequest (redemptionAmount)
 import Vault (Vault(..))
 
 template RedeemHandler
@@ -32,19 +31,16 @@ template RedeemHandler
           (shares > 0.0 && shares <= nav.totalShares)
         feeInfo <- view <$> fetch feeCid
         assertMsg "fee model belongs to another manager" (feeInfo.manager == manager)
-        let sharePrice = (view (toInterface @INAV nav)).sharePrice
-            -- The last redemption drains NAV exactly; partial payouts round down.
-            amount = if shares == nav.totalShares then nav.nav
-              else redemptionAmount shares nav.nav nav.totalShares
+        let (sharePrice, amount) = priceRedemption nav.nav nav.totalShares shares
         fee <- exercise feeCid CalculateFee with amount
         exercise navCid UpdateNAV with
           newNav = nav.nav - amount
           newTotalShares = nav.totalShares - shares
         pure RedeemQuote with amount, fee, sharePrice
 
--- Retain extra precision for the pro-rata calculation and floor the asset payout.
-redemptionAmount : Decimal -> Decimal -> Decimal -> Decimal
-redemptionAmount shares nav totalShares =
-  let exact = Numeric.div @20 (Numeric.mul @20 shares nav) (Numeric.cast @20 totalShares)
-      rounded = Numeric.cast @10 exact
-  in if Numeric.cast @20 rounded > exact then rounded - 0.0000000001 else rounded
+-- Price and gross payout for redeeming `shares`. The last redemption drains NAV
+-- exactly; partial payouts round down at the redemption price.
+priceRedemption : Decimal -> Decimal -> Decimal -> (Decimal, Decimal)
+priceRedemption nav totalShares shares =
+  let sharePrice = redeemSharePrice nav totalShares
+  in (sharePrice, if shares == totalShares then nav else redemptionAmount shares sharePrice)

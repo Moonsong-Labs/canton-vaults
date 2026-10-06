@@ -6,6 +6,8 @@ module Valuation.NAV where
 import Daml.Script
 import DA.Time (seconds)
 
+import Fixtures.Failures (submitMustViolateEnsure)
+
 import INAV
 import NAV
 
@@ -58,3 +60,21 @@ updateValuation = script do
   None <- queryInterfaceContractId depositor
     (toInterfaceContractId @INAV resolvedCid)
   pure ()
+
+navEnsureBoundaries : Script ()
+navEnsureBoundaries = script do
+  manager <- allocateParty "Manager"
+  now <- getTime
+  let snapshot nav totalShares = NAV with
+        vaultId = "treasury-vault"; manager; nav; totalShares; updatedAt = now; auditors = []
+
+  -- 0.001 over 1,000 shares sets the lowest allowed redemption price, 1e-6.
+  _ <- submit manager $ createCmd (snapshot 0.001 1000.0)
+  submitMustViolateEnsure manager $ createCmd (snapshot 0.000999 1000.0)
+  -- Shares without value, and value without shares, are rejected.
+  submitMustViolateEnsure manager $ createCmd (snapshot 0.0 1000.0)
+  submitMustViolateEnsure manager $ createCmd (snapshot 10.0 0.0)
+  -- NAV and supply stay within the range where pricing is exact.
+  _ <- submit manager $ createCmd (snapshot pricingLimit pricingLimit)
+  submitMustViolateEnsure manager $ createCmd (snapshot (pricingLimit + 1.0) pricingLimit)
+  submitMustViolateEnsure manager $ createCmd (snapshot pricingLimit (pricingLimit + 1.0))

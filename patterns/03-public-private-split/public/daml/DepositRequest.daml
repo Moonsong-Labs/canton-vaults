@@ -38,3 +38,4 @@ template DepositReceipt
     amount : Decimal
   where
     signatory manager, depositor
+    ensure vaultId /= "" && amount > 0.0

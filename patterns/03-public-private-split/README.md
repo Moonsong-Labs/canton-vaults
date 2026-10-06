@@ -99,7 +99,8 @@ make test-03-public-private-split
 make sandbox-public-private
 ```
 
-The two Daml tests cover an accepted deposit and rejection by the private limit.
+The three Daml tests cover an accepted deposit, rejection by the private limit,
+and the ensure clauses that reject non-positive amounts and empty vault IDs.
 The sandbox starts two in-memory PNs, a sequencer, and a mediator. It uploads
 the public DAR file (including its interface dependency) to both PNs and the
 private DAR file to the manager PN only. The expected flow is:
