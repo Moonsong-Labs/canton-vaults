@@ -4,6 +4,8 @@ Minimal examples for daml-lint commit `cba698832991f640f0e0d8a9e2bfb683717c6024`
 Each Daml file contains a failing case and a control case, with a comment stating
 the actual and expected findings.
 
+See [REPORT.md](REPORT.md) for the full parser review and proposed fixes.
+
 Run from the repository root:
 
 ```sh
