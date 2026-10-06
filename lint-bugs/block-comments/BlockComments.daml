@@ -1,0 +1,26 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module BlockComments where
+
+-- BUG: The linter incorrectly accepts the commented ensure as an active check
+-- and does not report the unbounded "payload" field.
+-- EXPECTED: MEDIUM unbounded-fields because commented code provides no bound.
+template WithCommentedEnsure
+  with
+    owner : Party
+    payload : Text
+  where
+    signatory owner
+    {-
+    ensure length payload <= 100
+    -}
+
+-- CONTROL: The linter correctly reports MEDIUM unbounded-fields for "payload".
+-- Neither template has an active length check.
+template WithoutEnsure
+  with
+    owner : Party
+    payload : Text
+  where
+    signatory owner

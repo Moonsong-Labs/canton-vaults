@@ -27,3 +27,4 @@ These examples are intentionally outside the project's `make lint` scan.
 | File | Actual | Expected |
 |---|---|---|
 | `keyword-prefix/KeywordPrefix.daml` | 1 MEDIUM: `WithWatchers` | 2 MEDIUM: `WithObservers` and `WithWatchers` |
+| `block-comments/BlockComments.daml` | 1 MEDIUM: `WithoutEnsure` | 2 MEDIUM: `WithCommentedEnsure` and `WithoutEnsure` |
