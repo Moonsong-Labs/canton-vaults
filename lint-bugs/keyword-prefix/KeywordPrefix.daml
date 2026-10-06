@@ -1,0 +1,24 @@
+-- SPDX-FileCopyrightText: 2026 Moonsong Labs
+-- SPDX-License-Identifier: MIT
+
+module KeywordPrefix where
+
+-- BUG: No finding. The parser mistakes "observers" for the "observer" clause.
+-- EXPECTED: MEDIUM unbounded-fields, just like WithWatchers below.
+template WithObservers
+  with
+    owner : Party
+    observers : [Party]
+  where
+    signatory owner
+    observer observers
+
+-- CONTROL: MEDIUM unbounded-fields is correctly reported for "watchers".
+-- Only the field name differs; both lists have no size bound.
+template WithWatchers
+  with
+    owner : Party
+    watchers : [Party]
+  where
+    signatory owner
+    observer watchers
