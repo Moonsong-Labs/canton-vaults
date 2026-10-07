@@ -9,6 +9,7 @@ dependencies:
 build-options:
   - --target=2.3
 data-dependencies:
+  - ../../dependencies/daml-props/daml-props-0.1.0.dar
   - ../assets/.daml/dist/vault-example-assets-0.1.0.dar
   - ../../dependencies/token-standard/splice-api-token-holding-v2-1.0.0.dar
   - ../../dependencies/token-standard/splice-api-token-allocation-v2-1.0.0.dar

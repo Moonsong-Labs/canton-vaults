@@ -65,6 +65,10 @@ never a redemption.
 The feature tests under `Onboarding/`, `Valuation/`, `Deposit/`, `Redeem/`,
 and `Investment/` cover each step in isolation, including a failed asset
 delivery that rolls back the cash payment.
+[`test/Valuation/SharePricing.daml`](test/Valuation/SharePricing.daml) checks
+the pricing with property-based tests from
+[daml-props](https://github.com/OpenZeppelin/daml-props), including random
+sequences of deposits, redemptions, and revaluations.
 
 ## Simplifications
 

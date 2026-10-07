@@ -1,0 +1,14 @@
+The DAR file in this directory is daml-props 0.1.0, a property-based testing
+library for Daml from the OpenZeppelin daml-props project:
+
+  https://github.com/OpenZeppelin/daml-props
+  commit 901571e509e899f3b2870fe9baaa6fc4ad8ff21b
+
+It was built unmodified from that commit with Daml SDK 3.4.10 (`dpm build`) and
+is used only by test packages. Upstream marks the library as experimental.
+`dpm test --all` also runs the four example scripts shipped in the DAR.
+daml-props is licensed under the MIT License; a copy is included in LICENSE.
+
+Packages:
+  daml-props-0.1.0.dar
+    sha256 d6b93cb8316eca1f29db6b56cb3e434779dcc93c6a04897795251e9ec17a22a7
