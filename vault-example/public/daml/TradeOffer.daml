@@ -3,6 +3,9 @@
 
 module TradeOffer where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import DA.List (dedup)
 import DA.Optional (fromSomeNote)
 import DA.Foldable (forA_)
@@ -39,7 +42,7 @@ template TradeOffer
   where
     signatory counterparty
     observer manager
-    ensure vaultId /= "" && counterparty /= manager
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && counterparty /= manager
       && counterpartyAccount.owner == Some counterparty
       && terms.asset /= terms.currency
       && terms.quantity > 0.0 && terms.unitPrice > 0.0 && tradeAmount terms > 0.0

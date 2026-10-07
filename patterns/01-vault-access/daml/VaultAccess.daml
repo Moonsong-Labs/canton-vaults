@@ -5,6 +5,7 @@ module VaultAccess where
 
 import DA.List (dedup)
 import DA.TextMap qualified as TextMap
+import DA.Text qualified as Text
 
 import Splice.Api.Token.AllocationInstructionV2
 import Splice.Api.Token.AllocationV2
@@ -14,6 +15,7 @@ import Splice.Api.Token.MetadataV1
 import AttestationInfo
 import DepositRequest
 import DepositInfo
+import VaultLimits (maxVaultIdLength)
 
 template VaultAccess
   with
@@ -24,7 +26,7 @@ template VaultAccess
   where
     signatory manager
     observer depositor
-    ensure vaultId /= ""
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength
 
     -- Deposits require both the per-vault access and general KYB approval to remain active.
     nonconsuming choice Deposit : ContractId DepositRequest

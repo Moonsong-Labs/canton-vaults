@@ -3,6 +3,9 @@
 
 module VaultAccess where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import DA.List (dedup)
 import DA.TextMap qualified as TextMap
 import Splice.Api.Token.AllocationInstructionV2
@@ -30,7 +33,7 @@ template VaultAccess
   where
     signatory manager
     observer depositor
-    ensure vaultId /= "" && acceptedInstrument.id /= "" && treasury.owner == Some manager
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && acceptedInstrument.id /= "" && treasury.owner == Some manager
       && feeTreasury.owner == Some manager && feeTreasury /= treasury
 
     interface instance IVaultAccess for VaultAccess where

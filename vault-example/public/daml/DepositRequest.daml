@@ -3,6 +3,9 @@
 
 module DepositRequest where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import DA.TextMap qualified as TextMap
 import Splice.Api.Token.AllocationV2
 import Splice.Api.Token.HoldingV2
@@ -36,7 +39,7 @@ template DepositRequest
   where
     signatory depositor
     observer manager
-    ensure vaultId /= "" && amount > 0.0 && instrumentId.id /= ""
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && amount > 0.0 && instrumentId.id /= ""
       && settlement.executors == [manager] && settlement.id == "vault-deposit"
       && settlement.cid == Some (coerceContractId vaultAccessCid)
 

@@ -3,6 +3,9 @@
 
 module Vault where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength, maxVaultNameLength)
+
 import IAccessAttestation
 import IVault
 import VaultAccess (VaultAccess(..))
@@ -26,7 +29,7 @@ template Vault
     feeTreasury : Account
   where
     signatory manager
-    ensure vaultId /= "" && name /= "" && acceptedInstrument.id /= ""
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength && name /= "" && Text.length name <= maxVaultNameLength && acceptedInstrument.id /= ""
       && treasury.owner == Some manager
       && feeTreasury.owner == Some manager && feeTreasury /= treasury
 
@@ -63,6 +66,8 @@ template Vault
         extraArgs : ExtraArgs
       controller manager
       do
+        assertMsg "buy requires treasury holdings"
+          (not (null treasuryHoldingCids))
         handler <- fetchTradeHandler this handlerCid
         handleTrade handler (toInterfaceContractId @IVault self) BuyAsset offerCid treasuryHoldingCids extraArgs
 
@@ -74,6 +79,8 @@ template Vault
         extraArgs : ExtraArgs
       controller manager
       do
+        assertMsg "sell requires asset holdings"
+          (not (null treasuryHoldingCids))
         handler <- fetchTradeHandler this handlerCid
         handleTrade handler (toInterfaceContractId @IVault self) SellAsset offerCid treasuryHoldingCids extraArgs
 
@@ -89,6 +96,8 @@ template Vault
         extraArgs : ExtraArgs
       controller manager
       do
+        assertMsg "redemption requires treasury holdings"
+          (not (null treasuryHoldingCids))
         request <- fetch requestCid
         assertMsg "redeem request belongs to another vault" (request.manager == manager && request.vaultId == vaultId)
         -- Require this vault's allocation implementation before approving a burn.

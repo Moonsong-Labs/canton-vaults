@@ -3,6 +3,9 @@
 
 module ShareRegistry where
 
+import DA.Text qualified as Text
+import VaultLimits (maxVaultIdLength)
+
 import DA.TextMap qualified as TextMap
 import Splice.Api.Token.HoldingV2
 import Splice.Api.Token.MetadataV1
@@ -16,7 +19,7 @@ template ShareRegistry
     manager : Party
   where
     signatory manager
-    ensure vaultId /= ""
+    ensure vaultId /= "" && Text.length vaultId <= maxVaultIdLength
 
     interface instance EventLog for ShareRegistry where
       view = EventLogView with admin = manager; meta = emptyMetadata

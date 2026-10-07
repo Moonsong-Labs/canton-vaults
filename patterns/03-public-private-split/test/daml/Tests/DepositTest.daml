@@ -75,13 +75,24 @@ testDepositRequiresPositiveAmount = script do
   depositor <- allocateParty "depositor"
   accessCid <- submit manager $ createCmd VaultAccess with manager; depositor; vaultId = "vault-1"
 
-  -- The request's ensure clause rejects a non-positive amount.
-  mustViolateEnsure =<< trySubmit depositor (exerciseCmd accessCid Deposit with amount = 0.0)
+  -- The choice rejects non-positive amounts before creating a request.
+  mustRejectDeposit =<< trySubmit depositor (exerciseCmd accessCid Deposit with amount = 0.0)
+  mustRejectDeposit =<< trySubmit depositor (exerciseCmd accessCid Deposit with amount = -1.0)
+  -- Direct request creation remains protected by the ensure clause.
+  mustViolateEnsure =<< trySubmit depositor
+    (createCmd DepositRequest with manager; depositor; vaultId = "vault-1"; amount = 0.0)
   -- Both signatories could create a receipt directly, so its invariant lives in ensure.
   mustViolateEnsure =<< trySubmit (actAs [manager, depositor])
     (createCmd DepositReceipt with manager; depositor; vaultId = "vault-1"; amount = 0.0)
   mustViolateEnsure =<< trySubmit (actAs [manager, depositor])
     (createCmd DepositReceipt with manager; depositor; vaultId = ""; amount = 1.0)
+
+mustRejectDeposit : Show a => Either SubmitError a -> Script ()
+mustRejectDeposit result = case result of
+  Left (FailureStatusError status)
+    | status.errorId == "UNHANDLED_EXCEPTION/DA.Exception.AssertionFailed:AssertionFailed"
+      && status.message == "deposit amount must be positive" -> pure ()
+  _ -> abort ("expected the deposit amount assertion to fail, got: " <> show result)
 
 mustViolateEnsure : Show a => Either SubmitError a -> Script ()
 mustViolateEnsure result = case result of

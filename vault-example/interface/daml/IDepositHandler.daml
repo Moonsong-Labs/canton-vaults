@@ -24,8 +24,10 @@ interface IDepositHandler where
 
 -- Round issuance down to the share holding's ten decimal places.
 sharesForDeposit : Decimal -> Decimal -> Decimal
-sharesForDeposit amount sharePrice =
-  let rounded = amount / sharePrice
-  in if Numeric.mul @20 rounded sharePrice > Numeric.cast @20 amount
-    then rounded - 0.0000000001
-    else rounded
+sharesForDeposit amount sharePrice
+  | sharePrice <= 0.0 = error "share price must be positive"
+  | otherwise =
+      let rounded = amount / sharePrice
+      in if Numeric.mul @20 rounded sharePrice > Numeric.cast @20 amount
+        then rounded - 0.0000000001
+        else rounded
